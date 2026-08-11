@@ -1,0 +1,66 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "PBI Lens Dev",
+  "version": "0.1.1",
+  "identifier": "com.pbilens.desktop.dev",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "macOSPrivateApi": true,
+    "windows": [
+      {
+        "title": "PBI Lens",
+        "width": 1280,
+        "height": 800,
+        "minWidth": 860,
+        "minHeight": 620,
+        "center": true,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true,
+        "acceptFirstMouse": true,
+        "dragDropEnabled": true
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self' customprotocol: asset:; connect-src ipc: http://ipc.localhost; img-src 'self' asset: http://asset.localhost blob: data:; style-src 'self' 'unsafe-inline'; script-src 'self'"
+    }
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/seg4lt/pbi-lens/releases/latest/download/latest.json"
+      ],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDRFNUE0RkNDNjI1RkJDQzkKUldUSnZGOWl6RTlhVG5NMi91VGtTSDJydldoNFhydGl6Lzk1R3VsUlA0T09vTXA2Wmt4QzBTbVEK"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "createUpdaterArtifacts": true,
+    "externalBin": [
+      "binaries/pbi-deep"
+    ],
+    "targets": [
+      "app",
+      "dmg"
+    ],
+    "category": "DeveloperTool",
+    "shortDescription": "Explore Power BI files natively on Mac",
+    "longDescription": "A fast, private, local-first explorer for PBIX and PBIT report files.",
+    "fileAssociations": [
+      {
+        "ext": [
+          "pbix",
+          "pbit"
+        ],
+        "name": "Power BI Report",
+        "description": "Microsoft Power BI report or template",
+        "role": "Viewer",
+        "mimeType": "application/octet-stream"
+      }
+    ]
+  }
+}

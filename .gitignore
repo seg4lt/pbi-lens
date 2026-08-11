@@ -1,0 +1,49 @@
+# JavaScript dependencies and Vite output
+/node_modules/
+/dist/
+/.vite/
+*.local
+
+# Rust and Tauri build output
+/src-tauri/target/
+/src-tauri/gen/schemas/
+
+# Python environments, caches, and PyInstaller output
+/.venv/
+/.venv-*/
+__pycache__/
+*.py[cod]
+*.pyo
+/sidecar/build/
+/sidecar/dist/
+/sidecar/*.spec
+
+# Environment files (keep a documented example if one is added)
+.env
+.env.*
+!.env.example
+
+# Logs and diagnostics
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+*.pid
+*.pid.lock
+
+# Editor and operating-system metadata
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+*.swp
+*.swo
+*~
+
+# Test and coverage output
+/coverage/
+/.nyc_output/
+*.profraw

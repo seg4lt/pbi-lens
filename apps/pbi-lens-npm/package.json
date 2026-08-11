@@ -1,0 +1,21 @@
+{
+  "name": "@seg4lt/pbi-lens",
+  "version": "1.0.0",
+  "description": "One-line installer for the latest PBI Lens macOS Apple Silicon release.",
+  "keywords": ["power-bi", "pbix", "pbit", "tauri", "macos", "installer"],
+  "homepage": "https://github.com/seg4lt/pbi-lens",
+  "bugs": { "url": "https://github.com/seg4lt/pbi-lens/issues" },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/seg4lt/pbi-lens.git",
+    "directory": "apps/pbi-lens-npm"
+  },
+  "license": "MIT",
+  "type": "commonjs",
+  "bin": { "pbi-lens": "bin/pbi-lens.js" },
+  "files": ["bin", "lib", "README.md"],
+  "engines": { "node": ">=20" },
+  "os": ["darwin"],
+  "cpu": ["arm64"],
+  "publishConfig": { "access": "public" }
+}

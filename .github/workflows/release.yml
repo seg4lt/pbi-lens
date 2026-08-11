@@ -1,0 +1,151 @@
+name: Release PBI Lens
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: pbi-lens-release-main
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  version:
+    name: Auto-bump patch version
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.bump.outputs.version }}
+      tag: ${{ steps.bump.outputs.tag }}
+      commit: ${{ steps.push.outputs.commit }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Make sure this is still the newest push
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git merge --ff-only origin/main
+
+      - name: Increment patch version everywhere
+        id: bump
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="$(node scripts/bump-patch.mjs)"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Commit generated version
+        id: push
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.bump.outputs.version }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add package.json package-lock.json src-tauri/tauri.conf.json src-tauri/Cargo.toml src-tauri/Cargo.lock
+          git commit -m "chore(release): v$VERSION [skip ci]"
+          git push origin HEAD:main
+          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build macOS Apple Silicon
+    needs: version
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.version.outputs.commit }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build signed updater and DMG
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
+          VITE_PBI_LENS_PROD: "true"
+        run: npm run tauri build -- --target aarch64-apple-darwin --config src-tauri/tauri.prod.conf.json
+
+      - name: Stage release files
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${{ needs.version.outputs.tag }}"
+          mkdir release-assets
+          DMG="$(find src-tauri/target/aarch64-apple-darwin/release/bundle/dmg -name '*.dmg' -type f | head -1)"
+          APP_TAR="$(find src-tauri/target/aarch64-apple-darwin/release/bundle/macos -name '*.app.tar.gz' -type f | head -1)"
+          APP_SIG="${APP_TAR}.sig"
+          test -n "$DMG" && test -f "$DMG"
+          test -n "$APP_TAR" && test -f "$APP_TAR" && test -f "$APP_SIG"
+          cp "$DMG" "release-assets/PBI-Lens-${TAG}-macos-arm64.dmg"
+          cp "$APP_TAR" "release-assets/PBI-Lens-${TAG}-macos-arm64.app.tar.gz"
+          cp "$APP_SIG" "release-assets/PBI-Lens-${TAG}-macos-arm64.app.tar.gz.sig"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pbi-lens-${{ needs.version.outputs.tag }}
+          path: release-assets/
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub update
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: pbi-lens-${{ needs.version.outputs.tag }}
+          path: release-assets
+
+      - name: Generate signed updater manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${{ needs.version.outputs.tag }}"
+          VERSION="${{ needs.version.outputs.version }}"
+          ASSET="PBI-Lens-${TAG}-macos-arm64.app.tar.gz"
+          SIGNATURE="$(cat "release-assets/${ASSET}.sig")"
+          jq -n \
+            --arg version "$VERSION" \
+            --arg notes "Automatic update from the latest main branch." \
+            --arg date "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" \
+            --arg signature "$SIGNATURE" \
+            --arg url "https://github.com/${{ github.repository }}/releases/download/${TAG}/${ASSET}" \
+            '{version:$version,notes:$notes,pub_date:$date,platforms:{"darwin-aarch64":{signature:$signature,url:$url}}}' \
+            > release-assets/latest.json
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.version.outputs.tag }}
+          target_commitish: ${{ needs.version.outputs.commit }}
+          name: PBI Lens ${{ needs.version.outputs.tag }}
+          generate_release_notes: true
+          files: release-assets/*

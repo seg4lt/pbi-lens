@@ -1,0 +1,41 @@
+name: Publish npm installer
+
+on:
+  push:
+    branches: [main]
+    paths: ["apps/pbi-lens-npm/**", ".github/workflows/publish-npm.yml"]
+  workflow_dispatch:
+
+concurrency:
+  group: pbi-lens-npm-publish
+  cancel-in-progress: true
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: https://registry.npmjs.org
+
+      - name: Check whether this wrapper version is already published
+        id: version
+        working-directory: apps/pbi-lens-npm
+        shell: bash
+        run: |
+          set -euo pipefail
+          LOCAL="$(node -p "require('./package.json').version")"
+          PUBLISHED="$(npm view @seg4lt/pbi-lens version 2>/dev/null || echo none)"
+          if [ "$LOCAL" = "$PUBLISHED" ]; then echo "skip=true" >> "$GITHUB_OUTPUT"; else echo "skip=false" >> "$GITHUB_OUTPUT"; fi
+
+      - name: Publish public installer with provenance
+        if: steps.version.outputs.skip != 'true'
+        working-directory: apps/pbi-lens-npm
+        run: npm publish --access public --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

@@ -1,0 +1,30 @@
+[package]
+name = "pbi-lens"
+version = "0.1.1"
+description = "A fast, local Power BI file explorer for macOS"
+authors = ["PBI Lens"]
+edition = "2021"
+
+[lib]
+name = "pbi_lens_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["macos-private-api"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+zip = { version = "4", default-features = false, features = ["deflate"] }
+rfd = "0.15"
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+opt-level = 3
+panic = "abort"
+strip = true
