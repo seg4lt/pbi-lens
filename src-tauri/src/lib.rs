@@ -1,5 +1,7 @@
+pub mod aas;
 pub mod pbix;
 
+use aas::{execute_dax, DaxRunRequest, DaxRunResult};
 use pbix::{
     parse_report, read_entry, read_table_rows as decode_table_rows, EntryContent, ReportFile,
     TableRows,
@@ -64,6 +66,13 @@ async fn read_table_rows(
 }
 
 #[tauri::command]
+async fn run_dax_query(request: DaxRunRequest) -> Result<DaxRunResult, String> {
+    tauri::async_runtime::spawn_blocking(move || execute_dax(request))
+        .await
+        .map_err(|error| format!("DAX runner task failed: {error}"))?
+}
+
+#[tauri::command]
 fn start_window_drag(window: tauri::Window) -> Result<(), String> {
     window
         .start_dragging()
@@ -82,6 +91,7 @@ pub fn run() {
             take_pending_paths,
             read_package_entry,
             read_table_rows,
+            run_dax_query,
             start_window_drag
         ])
         .build(tauri::generate_context!())

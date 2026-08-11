@@ -10,6 +10,7 @@
   let activePage = $state(0);
   let activeTable = $state(0);
   let activeQuery = $state(0);
+  let activeDaxQuery = $state(0);
   let activeColumn = $state(0);
   let activeVisual = $state(-1);
   let dataTable = $state(0);
@@ -43,6 +44,18 @@
   let updateStatus = $state('idle');
   let updateProgress = $state(null);
   let updateError = $state('');
+  let daxRunnerOpen = $state(false);
+  let daxRunLoading = $state(false);
+  let daxRunError = $state('');
+  let daxRunResult = $state(null);
+  let daxRunQuery = $state('');
+  let aasServerUrl = $state('');
+  let aasCatalog = $state('');
+  let aasTenantId = $state('');
+  let aasClientId = $state('');
+  let aasClientSecret = $state('');
+  let aasRole = $state('');
+  let aasCustomData = $state('');
 
   const UPDATE_CHECK_KEY = 'pbi-lens-update-last-check';
   const UPDATE_CHECK_INTERVAL = 24 * 60 * 60 * 1000;
@@ -52,6 +65,7 @@
     ['model', 'model', 'Model'],
     ['data', 'table', 'Data'],
     ['sources', 'database', 'Sources'],
+    ['queries', 'search', 'Queries'],
     ['contents', 'files', 'Contents']
   ];
 
@@ -79,6 +93,8 @@
       activePage = 0;
       activeTable = firstBusinessTable >= 0 ? firstBusinessTable : 0;
       activeQuery = 0;
+      const defaultDaxQuery = data.dax_queries?.findIndex((query) => query.is_default) ?? -1;
+      activeDaxQuery = defaultDaxQuery >= 0 ? defaultDaxQuery : 0;
       activeColumn = 0;
       activeVisual = -1;
       dataTable = firstBusinessTable >= 0 ? firstBusinessTable : 0;
@@ -92,7 +108,13 @@
       columnSearch = '';
       dataFilter = '';
       reportFitMode = true;
-      hiddenVisuals = [];
+      hiddenVisuals = (data.pages[0]?.visuals || []).map((visual, index) => visual.is_hidden ? index : -1).filter((index) => index >= 0);
+      aasServerUrl = data.aas_connection?.server_url || '';
+      aasCatalog = data.aas_connection?.catalog || '';
+      aasClientSecret = '';
+      daxRunnerOpen = false;
+      daxRunResult = null;
+      daxRunError = '';
       const entry = { path: data.path, name: data.name, size: data.size };
       recent = [entry, ...recent.filter((r) => r.path !== entry.path)].slice(0, 6);
       localStorage.setItem('pbi-lens-recent', JSON.stringify(recent));
@@ -215,6 +237,102 @@
       content: query.formula || 'No M expression was exposed for this query.',
       language: 'M'
     };
+  }
+
+  function openVisualQuery(visual) {
+    const payload = {};
+    if (visual?.prototype_query && Object.keys(visual.prototype_query).length) payload.prototypeQuery = visual.prototype_query;
+    if (visual?.semantic_query && Object.keys(visual.semantic_query).length) payload.semanticQueryDataShape = visual.semantic_query;
+    if (visual?.data_transforms && Object.keys(visual.data_transforms).length) payload.dataTransforms = visual.data_transforms;
+    fieldDialog = {
+      kind: 'VISUAL SEMANTIC QUERY',
+      title: visual?.title || visual?.visual_type_label || 'Visual query',
+      subtitle: `${visual?.aggregations?.length || 0} aggregations · the semantic query drives this visual; prototypeQuery stores its authoring bindings`,
+      content: Object.keys(payload).length ? JSON.stringify(payload, null, 2) : 'No semantic query was packaged for this visual.',
+      language: 'JSON'
+    };
+  }
+
+  function openBookmark(bookmark) {
+    fieldDialog = {
+      kind: 'BOOKMARK STATE',
+      title: bookmark.name,
+      subtitle: `${bookmark.hidden_visual_count} hidden visuals · ${bookmark.filter_count} filter nodes · active page ${bookmark.active_page || 'unknown'}`,
+      content: JSON.stringify(bookmark.state, null, 2),
+      language: 'JSON'
+    };
+  }
+
+  function openCachedWhere(filter) {
+    fieldDialog = {
+      kind: 'CACHED MERGED WHERE',
+      title: 'Power BI resolved query filter',
+      subtitle: filter.note || 'The filter scopes Power BI merged when this visual last ran.',
+      content: filter.expression || 'No resolved filter expression was packaged.',
+      language: 'FILTER'
+    };
+  }
+
+  function openInteraction(interaction, otherLabel) {
+    fieldDialog = {
+      kind: 'EDIT INTERACTION',
+      title: `${interaction.behavior}: ${otherLabel}`,
+      subtitle: 'The complete page-level interaction stored by Power BI.',
+      content: [
+        `Behavior: ${interaction.behavior}`,
+        `Type: ${interaction.interaction_type}`,
+        `Source visual: ${interaction.source}`,
+        `Target visual: ${interaction.target}`
+      ].join('\n'),
+      language: 'INTERACTION'
+    };
+  }
+
+  function openDaxRunner(query) {
+    daxRunQuery = query?.expression || '';
+    aasServerUrl ||= report?.aas_connection?.server_url || '';
+    aasCatalog ||= report?.aas_connection?.catalog || '';
+    daxRunResult = null;
+    daxRunError = '';
+    daxRunnerOpen = true;
+  }
+
+  function closeDaxRunner() {
+    if (daxRunLoading) return;
+    daxRunnerOpen = false;
+    daxRunResult = null;
+    daxRunError = '';
+    aasTenantId = '';
+    aasClientId = '';
+    aasClientSecret = '';
+    aasRole = '';
+    aasCustomData = '';
+    aasServerUrl = report?.aas_connection?.server_url || '';
+    aasCatalog = report?.aas_connection?.catalog || '';
+  }
+
+  async function runDax() {
+    daxRunLoading = true;
+    daxRunError = '';
+    daxRunResult = null;
+    try {
+      daxRunResult = await invoke('run_dax_query', {
+        request: {
+          serverUrl: aasServerUrl,
+          catalog: aasCatalog,
+          tenantId: aasTenantId,
+          clientId: aasClientId,
+          clientSecret: aasClientSecret,
+          role: aasRole,
+          customData: aasCustomData,
+          query: daxRunQuery
+        }
+      });
+    } catch (e) {
+      daxRunError = String(e).replace(/^Error: /, '');
+    } finally {
+      daxRunLoading = false;
+    }
   }
 
   function visibleTables() {
@@ -440,6 +558,10 @@
           <button class:active={activeView === item[0]} onclick={() => selectView(item[0])} title={item[2]}><Icon name={item[1]} size={20}/><span>{item[2]}</span></button>
         {/each}
       </nav>
+      <button class="rail-dax" class:active={daxRunnerOpen} onclick={() => openDaxRunner()} title="Run DAX query">
+        <Icon name="play" size={20}/>
+        <span>Run DAX</span>
+      </button>
       <button
         class="rail-update"
         class:busy={updateStatus === 'checking' || updateStatus === 'downloading' || updateStatus === 'installing'}
@@ -481,9 +603,9 @@
             <div class="panel-title"><span>PAGES</span><b>{report.pages.length}</b></div>
             <div class="page-list">
               {#each report.pages as page, i}
-                <button class:active={activePage === i} onclick={() => { activePage = i; activeVisual = -1; hiddenVisuals = []; reportFitMode = true; setTimeout(updateCanvasSize); }}>
+                <button class:active={activePage === i} onclick={() => { activePage = i; activeVisual = -1; hiddenVisuals = page.visuals.map((visual, index) => visual.is_hidden ? index : -1).filter((index) => index >= 0); reportFitMode = true; setTimeout(updateCanvasSize); }}>
                   <span class="page-thumb"><span></span><i></i><i></i></span>
-                  <span><strong>{page.display_name}</strong><small>{page.visuals.length} visuals</small></span>
+                  <span><strong>{page.display_name}</strong><small>{page.visuals.length} visuals{page.is_drillthrough ? ' · drillthrough' : page.is_hidden ? ' · hidden' : ''}</small></span>
                 </button>
               {/each}
             </div>
@@ -556,7 +678,57 @@
                 <div><dt>Position</dt><dd>{Math.round(selectedVisual.x_pct)}%, {Math.round(selectedVisual.y_pct)}%</dd></div>
                 <div><dt>Size</dt><dd>{Math.round(selectedVisual.w_pct)}% × {Math.round(selectedVisual.h_pct)}%</dd></div>
                 <div><dt>Layer</dt><dd>{selectedVisual.z_index}</dd></div>
+                <div><dt>Default state</dt><dd>{selectedVisual.is_hidden ? 'Hidden' : 'Visible'}</dd></div>
+                {#if selectedVisual.sync_group}<div><dt>Sync group</dt><dd>{selectedVisual.sync_group.group_name}</dd></div>{/if}
               </dl>
+              {#if selectedVisual.aggregations?.length}
+                <div class="panel-title second"><span>AGGREGATIONS</span><b>{selectedVisual.aggregations.length}</b></div>
+                <div class="filter-list aggregation-list">
+                  {#each selectedVisual.aggregations as aggregation}
+                    <div><strong>{aggregation.display_name || aggregation.native_name || aggregation.field}</strong><span>{aggregation.function_name} · function code {aggregation.function_code}</span><code>{aggregation.field}</code></div>
+                  {/each}
+                </div>
+              {/if}
+              {#if selectedVisual.resolved_filters?.length}
+                <div class="panel-title second"><span>CACHED MERGED WHERE</span><b>{selectedVisual.resolved_filters.length}</b></div>
+                <div class="filter-list resolved-filter-list">
+                  {#each selectedVisual.resolved_filters as filter}
+                    <button class="detail-card" onclick={() => openCachedWhere(filter)} title="Open complete cached filter"><strong>Power BI resolved query</strong><code>{filter.expression}</code><em>{filter.note}</em><small>CLICK TO EXPAND</small></button>
+                  {/each}
+                </div>
+              {/if}
+              {@const selectedInteractions = (report.pages[activePage]?.interactions || []).filter((item) => item.source === selectedVisual.id || item.target === selectedVisual.id)}
+              {#if selectedInteractions.length}
+                <div class="panel-title second"><span>EDIT INTERACTIONS</span><b>{selectedInteractions.length}</b></div>
+                <div class="filter-list interaction-list">
+                  {#each selectedInteractions as interaction}
+                    {@const otherId = interaction.source === selectedVisual.id ? interaction.target : interaction.source}
+                    {@const other = report.pages[activePage]?.visuals.find((visual) => visual.id === otherId)}
+                    {@const otherLabel = other?.title || other?.visual_type_label || otherId}
+                    <button class="detail-card" onclick={() => openInteraction(interaction, otherLabel)} title="Open complete edit interaction"><strong>{interaction.behavior}</strong><span>{interaction.source === selectedVisual.id ? 'To' : 'From'} {otherLabel}</span><code>type {interaction.interaction_type}</code><small>CLICK TO EXPAND</small></button>
+                  {/each}
+                </div>
+              {/if}
+              {@const effectiveFilters = [...(report.report_filters || []), ...(report.pages[activePage]?.filters || []), ...(selectedVisual.filters || []), ...(selectedVisual.slicer_selections || [])]}
+              {#if effectiveFilters.length}
+                <div class="panel-title second"><span>FILTER CONTEXT</span><b>{effectiveFilters.length}</b></div>
+                <div class="filter-list">
+                  {#each effectiveFilters as filter}
+                    <div class:inactive={!filter.active}><strong>{filter.scope} · {filter.kind || 'Filter'}</strong><span>{filter.target || 'Selection'}</span><code>{filter.expression}</code>{#if filter.note}<em>{filter.note}</em>{/if}</div>
+                  {/each}
+                </div>
+              {/if}
+              {#if selectedVisual.column_labels?.length}
+                <div class="panel-title second"><span>DISPLAY LABELS</span><b>{selectedVisual.column_labels.length}</b></div>
+                <div class="filter-list label-list">{#each selectedVisual.column_labels as label}<div><strong>{label.display_name}</strong><code>{label.query_ref}</code></div>{/each}</div>
+              {/if}
+              {#if selectedVisual.bookmark_target}
+                {@const bookmark = report.bookmarks?.find((item) => item.id === selectedVisual.bookmark_target)}
+                <button class="inspector-action query-action" onclick={() => bookmark && openBookmark(bookmark)}>BOOKMARK → {bookmark?.name || selectedVisual.bookmark_target}</button>
+              {/if}
+              {#if (selectedVisual.prototype_query && Object.keys(selectedVisual.prototype_query).length) || (selectedVisual.semantic_query && Object.keys(selectedVisual.semantic_query).length)}
+                <button class="inspector-action query-action" onclick={() => openVisualQuery(selectedVisual)}>VIEW SEMANTIC QUERY</button>
+              {/if}
               <button class="inspector-action" onclick={() => copyText(JSON.stringify(selectedVisual, null, 2), 'visual')}>{copied === 'visual' ? 'COPIED' : 'COPY VISUAL METADATA'}</button>
               <button class="inspector-action subtle" onclick={() => toggleVisualVisibility(activeVisual)}>HIDE FROM PREVIEW</button>
             {:else}
@@ -565,8 +737,36 @@
                 <div><dt>Pages</dt><dd>{report.pages.length}</dd></div>
                 <div><dt>Visuals</dt><dd>{report.visual_count}</dd></div>
                 <div><dt>Model tables</dt><dd>{report.tables.length}</dd></div>
+                <div><dt>Saved DAX queries</dt><dd>{report.dax_queries?.length || 0}</dd></div>
+                <div><dt>Bookmarks</dt><dd>{report.bookmarks?.length || 0}</dd></div>
+                <div><dt>Page interactions</dt><dd>{report.pages[activePage]?.interactions?.length || 0}</dd></div>
+                <div><dt>Mobile layouts</dt><dd>{report.mobile_layout_count || 0}</dd></div>
                 <div><dt>Package files</dt><dd>{report.entries.length}</dd></div>
               </dl>
+              {#if report.pages[activePage]?.interactions?.length}
+                <div class="panel-title second"><span>EDIT INTERACTIONS</span><b>{report.pages[activePage].interactions.length}</b></div>
+                <div class="interaction-summary"><span>{report.pages[activePage].interactions.filter((item) => item.interaction_type === 1).length} filter</span><span>{report.pages[activePage].interactions.filter((item) => item.interaction_type === 3).length} disconnected</span></div>
+              {/if}
+              {#if report.bookmarks?.length}
+                <div class="panel-title second"><span>BOOKMARKS</span><b>{report.bookmarks.length}</b></div>
+                <div class="bookmark-list">{#each report.bookmarks as bookmark}<button onclick={() => openBookmark(bookmark)}><strong>{bookmark.name}</strong><span>{bookmark.hidden_visual_count} hidden · {bookmark.filter_count} filters</span></button>{/each}</div>
+              {/if}
+              {#if report.report_filters?.length}
+                <div class="panel-title second"><span>REPORT FILTERS</span><b>{report.report_filters.length}</b></div>
+                <div class="filter-list">
+                  {#each report.report_filters as filter}
+                    <div class:inactive={!filter.active}><strong>{filter.kind || 'Filter'}</strong><span>{filter.target}</span><code>{filter.expression}</code></div>
+                  {/each}
+                </div>
+              {/if}
+              {#if report.pages[activePage]?.filters?.length}
+                <div class="panel-title second"><span>PAGE FILTERS</span><b>{report.pages[activePage].filters.length}</b></div>
+                <div class="filter-list">
+                  {#each report.pages[activePage].filters as filter}
+                    <div class:inactive={!filter.active}><strong>{filter.kind || 'Filter'}</strong><span>{filter.target}</span><code>{filter.expression}</code></div>
+                  {/each}
+                </div>
+              {/if}
             {/if}
             <div class="panel-title second"><span>{activeVisual >= 0 ? 'BOUND FIELDS' : 'PAGE FIELDS'}</span></div>
             {#if activeVisual >= 0}
@@ -607,6 +807,9 @@
           <section class="content-view">
             <div class="view-heading"><div><div class="crumb">SEMANTIC MODEL {report.deep_model ? '/ DECODED' : ''}</div><h2>{report.tables[activeTable]?.name || 'Data model'}</h2></div><div class="canvas-meta">{report.tables[activeTable]?.row_count ?? '—'} rows · {report.relationships.length} relationships</div></div>
             {#if report.tables[activeTable]}
+              {#if !report.tables[activeTable].columns.length && report.tables[activeTable].description}
+                <div class="model-notice"><Icon name="info" size={15}/><span>{report.tables[activeTable].description}</span></div>
+              {/if}
               <div class="panel-search column-search"><Icon name="search" size={13}/><input bind:value={columnSearch} placeholder="Find column or measure" /></div>
               <div class="data-card">
                 <div class="data-header"><span>Column</span><span>Data type</span><span>Kind</span></div>
@@ -663,6 +866,29 @@
             {/if}
           </section>
         </div>
+      {:else if activeView === 'queries'}
+        <section class="content-view standalone sources-view">
+          <div class="view-heading"><div><div class="crumb">DAX WORKBENCH</div><h2>Saved DAX queries</h2></div><div class="canvas-meta">{report.dax_queries?.length || 0} saved query tabs</div></div>
+          {#if report.dax_queries?.length}
+            <div class="query-notice"><Icon name="info" size={15}/><span>These are queries saved by the report author in Power BI Desktop. They are useful runnable examples, but they do not automatically drive report visuals. Select a visual and choose “View semantic query” for its actual query definition.</span></div>
+            <div class="query-explorer dax-query-explorer">
+              <aside class="query-list">
+                {#each report.dax_queries as query, i}
+                  <button class:active={activeDaxQuery === i} onclick={() => activeDaxQuery = i}>
+                    <Icon name="search" size={15}/><span><strong>{query.name}{query.is_default ? ' · DEFAULT' : ''}</strong><code>{query.path}</code></span>
+                  </button>
+                {/each}
+              </aside>
+              <section class="query-code">
+                <header><span><i></i>{report.dax_queries[activeDaxQuery]?.name}.dax</span><div class="code-tools"><label><Icon name="search" size={12}/><input bind:value={querySearch} placeholder="Find in DAX" /></label>{#if querySearch}<b>{(report.dax_queries[activeDaxQuery]?.expression || '').toLowerCase().split(querySearch.toLowerCase()).length - 1} MATCHES</b>{/if}<button class="run-query-button" onclick={() => openDaxRunner(report.dax_queries[activeDaxQuery])}>RUN DAX</button><button onclick={() => copyText(report.dax_queries[activeDaxQuery]?.expression, 'saved-dax')}>{copied === 'saved-dax' ? 'COPIED' : 'COPY DAX'}</button></div></header>
+                <div class="query-facts"><span>SAVED AUTHOR QUERY</span><em>UTF-16 DAX extracted directly from the package</em></div>
+                <div class="code-lines">{#each (report.dax_queries[activeDaxQuery]?.expression || '').split('\n') as line, i}<div class:match={querySearch && line.toLowerCase().includes(querySearch.toLowerCase())}><span>{i + 1}</span><code>{line || ' '}</code></div>{/each}</div>
+              </section>
+            </div>
+          {:else}
+            <div class="big-empty"><Icon name="search" size={34}/><h3>No saved DAX query tabs</h3><p>This is normal when the report author never used Power BI Desktop’s DAX query view. Each data visual can still contain its own semantic query—select one in Report and open “View semantic query.”</p></div>
+          {/if}
+        </section>
       {:else if activeView === 'sources'}
         <section class="content-view standalone sources-view">
           <div class="view-heading"><div><div class="crumb">CONNECTIONS &amp; POWER QUERY</div><h2>Data sources</h2></div><div class="canvas-meta">{report.sources.length} sources · {report.queries.length} queries</div></div>
@@ -713,6 +939,43 @@
           <div class="field-dialog-meta"><span>{fieldDialog.language}</span><p>{fieldDialog.subtitle}</p></div>
           <pre>{fieldDialog.content}</pre>
           <footer><button onclick={() => copyText(fieldDialog.content, 'field-dialog')}>{copied === 'field-dialog' ? 'COPIED' : `COPY ${fieldDialog.language}`}</button><button class="primary" onclick={() => fieldDialog = null}>DONE</button></footer>
+        </div>
+      </dialog>
+    {/if}
+    {#if daxRunnerOpen}
+      <dialog open class="dax-runner-backdrop" aria-labelledby="dax-runner-title" onclick={(event) => { if (event.target === event.currentTarget) closeDaxRunner(); }}>
+        <div class="dax-runner">
+          <header><div><div class="crumb">LIVE AAS / XMLA</div><strong id="dax-runner-title">Run DAX query</strong></div><button onclick={closeDaxRunner} disabled={daxRunLoading} aria-label="Close DAX runner"><Icon name="close" size={17}/></button></header>
+          <div class="dax-runner-body">
+            <section class="runner-config">
+              <div class="runner-section-title">SERVER &amp; MODEL</div>
+              <label><span>AAS server URL</span><input bind:value={aasServerUrl} placeholder="Enter exact configured server URL"/><small>Loaded from the opened PBIT connection when it is packaged there; otherwise left blank.</small></label>
+              <label><span>Catalog / model</span><input bind:value={aasCatalog} placeholder="Enter exact catalog name"/></label>
+
+              <div class="runner-section-title">AZURE APPLICATION CREDENTIALS</div>
+              <label><span>Tenant ID</span><input bind:value={aasTenantId} placeholder="Microsoft Entra tenant UUID" autocomplete="off"/></label>
+              <label><span>Client ID</span><input bind:value={aasClientId} placeholder="Analysis Services application client UUID" autocomplete="off"/></label>
+              <label><span>Client secret</span><input type="password" bind:value={aasClientSecret} placeholder="Application client secret" autocomplete="off"/><small>Held in memory only. It is never saved to disk or local storage.</small></label>
+
+              <div class="runner-section-title">OPTIONAL ROW-LEVEL SECURITY</div>
+              <label><span>AAS role</span><input type="password" bind:value={aasRole} placeholder="Enter exact configured role" autocomplete="off"/><small>Leave Role and CustomData both blank for an unscoped service-principal query. Both fields are masked and cleared when this dialog closes.</small></label>
+              <label><span>CustomData</span><input type="password" bind:value={aasCustomData} placeholder="Paste exact configured CustomData value" autocomplete="off"/><small>This value cannot be inferred from the DAX query and is cleared when this dialog closes.</small></label>
+            </section>
+            <section class="runner-query">
+              <div class="runner-section-title">DAX QUERY</div>
+              <textarea bind:value={daxRunQuery} spellcheck="false" aria-label="DAX query" placeholder="Enter DAX query"></textarea>
+              {#if daxRunError}<div class="runner-error"><Icon name="warning" size={16}/><span><strong>Query failed</strong>{daxRunError}</span></div>{/if}
+              {#if daxRunResult}
+                <div class="runner-result-meta"><span>HTTP {daxRunResult.http_status}</span><span>{daxRunResult.elapsed_ms} ms</span><span>{daxRunResult.rows.length} rows</span></div>
+                {#if daxRunResult.columns.length}
+                  <div class="runner-table-wrap"><table><thead><tr>{#each daxRunResult.columns as column}<th>{column}</th>{/each}</tr></thead><tbody>{#each daxRunResult.rows.slice(0, 500) as row}<tr>{#each row as cell}<td>{cell}</td>{/each}</tr>{/each}</tbody></table></div>
+                {:else}<div class="runner-empty-result">The request succeeded but the XMLA response contained no tabular rows.</div>{/if}
+              {:else if !daxRunError}
+                <div class="runner-placeholder"><Icon name="info" size={22}/><strong>Ready to query Azure Analysis Services</strong><span>Nothing is sent until you press Run. Results and server errors will appear here.</span></div>
+              {/if}
+            </section>
+          </div>
+          <footer><span>Runs directly against the configured AAS model using XMLA.</span><button onclick={closeDaxRunner} disabled={daxRunLoading}>CANCEL</button><button class="primary" onclick={runDax} disabled={daxRunLoading}>{daxRunLoading ? 'RUNNING…' : 'RUN DAX'}</button></footer>
         </div>
       </dialog>
     {/if}

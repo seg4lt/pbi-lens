@@ -19,6 +19,7 @@
     warning: '<path d="M12 3 2.8 20h18.4z"/><path d="M12 9v5M12 17v.2"/>',
     grid: '<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/>',
     plus: '<path d="M12 5v14M5 12h14"/>',
+    play: '<path d="m8 5 11 7-11 7z"/>',
     download: '<path d="M12 3v12m0 0 5-5m-5 5-5-5"/><path d="M4 17v3h16v-3"/>'
   };
 </script>

@@ -23,6 +23,11 @@ pub struct ReportFile {
     pub parse_ms: u128,
     pub pages: Vec<Page>,
     pub visual_count: usize,
+    pub report_filters: Vec<FilterInfo>,
+    pub dax_queries: Vec<DaxQuery>,
+    pub aas_connection: Option<AasConnection>,
+    pub bookmarks: Vec<BookmarkInfo>,
+    pub mobile_layout_count: usize,
     pub tables: Vec<Table>,
     pub relationships: Vec<Relationship>,
     pub sources: Vec<Source>,
@@ -39,10 +44,15 @@ pub struct Page {
     pub display_name: String,
     pub width: f64,
     pub height: f64,
+    pub filters: Vec<FilterInfo>,
+    pub is_hidden: bool,
+    pub is_drillthrough: bool,
+    pub interactions: Vec<InteractionInfo>,
     pub visuals: Vec<Visual>,
 }
 #[derive(Serialize)]
 pub struct Visual {
+    pub id: String,
     pub visual_type: String,
     pub visual_type_label: String,
     pub title: String,
@@ -52,6 +62,75 @@ pub struct Visual {
     pub h_pct: f64,
     pub z_index: i64,
     pub fields: Vec<String>,
+    pub is_hidden: bool,
+    pub prototype_query: Value,
+    pub semantic_query: Value,
+    pub data_transforms: Value,
+    pub aggregations: Vec<AggregationInfo>,
+    pub resolved_filters: Vec<FilterInfo>,
+    pub filters: Vec<FilterInfo>,
+    pub slicer_selections: Vec<FilterInfo>,
+    pub column_labels: Vec<ColumnLabel>,
+    pub sync_group: Option<SyncGroupInfo>,
+    pub bookmark_target: String,
+}
+#[derive(Serialize, Clone)]
+pub struct FilterInfo {
+    pub scope: String,
+    pub target: String,
+    pub kind: String,
+    pub expression: String,
+    pub active: bool,
+    pub note: String,
+}
+#[derive(Serialize)]
+pub struct AggregationInfo {
+    pub field: String,
+    pub function_code: i64,
+    pub function_name: String,
+    pub native_name: String,
+    pub display_name: String,
+}
+#[derive(Serialize)]
+pub struct DaxQuery {
+    pub name: String,
+    pub path: String,
+    pub expression: String,
+    pub is_default: bool,
+}
+#[derive(Serialize)]
+pub struct AasConnection {
+    pub server_url: String,
+    pub catalog: String,
+    pub cube: String,
+    pub connection_type: String,
+}
+#[derive(Serialize)]
+pub struct BookmarkInfo {
+    pub name: String,
+    pub id: String,
+    pub active_page: String,
+    pub hidden_visual_count: usize,
+    pub filter_count: usize,
+    pub state: Value,
+}
+#[derive(Serialize)]
+pub struct InteractionInfo {
+    pub source: String,
+    pub target: String,
+    pub interaction_type: i64,
+    pub behavior: String,
+}
+#[derive(Serialize)]
+pub struct ColumnLabel {
+    pub query_ref: String,
+    pub display_name: String,
+}
+#[derive(Serialize)]
+pub struct SyncGroupInfo {
+    pub group_name: String,
+    pub field_changes: bool,
+    pub filter_changes: bool,
 }
 #[derive(Serialize, Deserialize)]
 pub struct Table {
@@ -243,6 +322,9 @@ pub fn parse_report(path: &Path) -> Result<ReportFile, String> {
     let mut schema = None;
     let mut connections = None;
     let mut mashup = None;
+    let mut diagram_layout = None;
+    let mut dax_queries = Vec::new();
+    let mut dax_query_metadata = None;
     let mut has_data_model = false;
     for i in 0..zip.len() {
         let mut item = zip
@@ -264,6 +346,21 @@ pub fn parse_report(path: &Path) -> Result<ReportFile, String> {
             schema = read_text(&mut item);
         } else if normalized == "connections" || normalized.ends_with("/connections") {
             connections = read_text(&mut item);
+        } else if normalized == "diagramlayout" || normalized.ends_with("/diagramlayout") {
+            diagram_layout = read_text(&mut item);
+        } else if normalized == "daxqueries/.pbi/daxqueries.json" {
+            dax_query_metadata = read_text(&mut item);
+        } else if normalized.starts_with("daxqueries/") && normalized.ends_with(".dax") {
+            if item.size() <= 4 * 1024 * 1024 {
+                if let Some(expression) = read_text(&mut item) {
+                    dax_queries.push(DaxQuery {
+                        name: dax_query_display_name(&name),
+                        path: name,
+                        expression,
+                        is_default: false,
+                    });
+                }
+            }
         } else if (normalized == "datamashup" || normalized.ends_with("/datamashup"))
             && item.size() <= 64 * 1024 * 1024
         {
@@ -273,6 +370,7 @@ pub fn parse_report(path: &Path) -> Result<ReportFile, String> {
             }
         }
     }
+    apply_dax_query_metadata(&mut dax_queries, dax_query_metadata.as_deref());
     let layout_json = layout
         .as_deref()
         .and_then(|s| serde_json::from_str::<Value>(s).ok());
@@ -281,16 +379,33 @@ pub fn parse_report(path: &Path) -> Result<ReportFile, String> {
         .as_ref()
         .map(parse_report_measure_tables)
         .unwrap_or_default();
+    let report_filters = layout_json
+        .as_ref()
+        .map(|layout| parse_filters(layout.get("filters"), "Report", false))
+        .unwrap_or_default();
+    let bookmarks = layout_json
+        .as_ref()
+        .map(parse_bookmarks)
+        .unwrap_or_default();
+    let mobile_layout_count = layout_json
+        .as_ref()
+        .map(count_mobile_layouts)
+        .unwrap_or_default();
+    let diagram_tables = diagram_layout
+        .as_deref()
+        .and_then(|value| serde_json::from_str::<Value>(value).ok())
+        .map(|value| parse_diagram_tables(&value))
+        .unwrap_or_default();
     let (mut tables, mut relationships) = schema
         .as_deref()
         .and_then(|s| serde_json::from_str::<Value>(s).ok())
         .map(parse_model)
         .unwrap_or_default();
-    let mut sources = connections
+    let connections_json = connections
         .as_deref()
-        .and_then(|s| serde_json::from_str::<Value>(s).ok())
-        .map(parse_sources)
-        .unwrap_or_default();
+        .and_then(|s| serde_json::from_str::<Value>(s).ok());
+    let aas_connection = connections_json.as_ref().and_then(parse_aas_connection);
+    let mut sources = connections_json.map(parse_sources).unwrap_or_default();
     let (mut queries, mashup_sources) = mashup.as_deref().map(parse_mashup).unwrap_or_default();
     let mut known_sources: HashSet<String> = sources.iter().map(|s| s.detail.clone()).collect();
     sources.extend(
@@ -348,6 +463,7 @@ pub fn parse_report(path: &Path) -> Result<ReportFile, String> {
         }
     }
     merge_report_measure_tables(&mut tables, report_measure_tables);
+    merge_diagram_tables(&mut tables, diagram_tables);
     let visual_count = pages.iter().map(|p| p.visuals.len()).sum();
     Ok(ReportFile {
         path: path.to_string_lossy().into_owned(),
@@ -361,6 +477,11 @@ pub fn parse_report(path: &Path) -> Result<ReportFile, String> {
         parse_ms: started.elapsed().as_millis(),
         pages,
         visual_count,
+        report_filters,
+        dax_queries,
+        aas_connection,
+        bookmarks,
+        mobile_layout_count,
         tables,
         relationships,
         sources,
@@ -667,7 +788,6 @@ fn decode_bytes(bytes: &[u8]) -> Option<String> {
 }
 
 fn parse_pages(root: Value) -> Vec<Page> {
-    let bookmark_hidden = bookmark_hidden_visuals(&root);
     let sections = root
         .get("sections")
         .and_then(Value::as_array)
@@ -677,9 +797,20 @@ fn parse_pages(root: Value) -> Vec<Page> {
         .into_iter()
         .map(|s| {
             let section_name = text(&s, "name");
-            let hidden_visuals = bookmark_hidden.get(&section_name);
             let width = num(&s, "width", 1280.0);
             let height = num(&s, "height", 720.0);
+            let filters = parse_filters(s.get("filters"), "Page", false);
+            let section_config = embedded_json(s.get("config"));
+            let interactions = parse_interactions(&section_config);
+            let is_hidden = s.get("visibility").and_then(Value::as_i64) == Some(1);
+            let is_drillthrough =
+                embedded_json(s.get("filters"))
+                    .as_array()
+                    .is_some_and(|filters| {
+                        filters.iter().any(|filter| {
+                            filter.get("howCreated").and_then(Value::as_i64) == Some(5)
+                        })
+                    });
             let items = s.get("visualContainers").and_then(Value::as_array);
             let mut groups: HashMap<String, (f64, f64, i64, bool, String)> = HashMap::new();
             if let Some(items) = items {
@@ -713,11 +844,6 @@ fn parse_pages(root: Value) -> Vec<Page> {
                             if config.get("singleVisualGroup").is_some() {
                                 return None;
                             }
-                            if hidden_visuals
-                                .is_some_and(|items| items.contains(&text(&config, "name")))
-                            {
-                                return None;
-                            }
                             let mut parent = text(&config, "parentGroupName");
                             let mut offset_x = 0.0;
                             let mut offset_y = 0.0;
@@ -746,57 +872,13 @@ fn parse_pages(root: Value) -> Vec<Page> {
                 display_name: nonempty(text(&s, "displayName"), "Untitled page"),
                 width,
                 height,
+                filters,
+                is_hidden,
+                is_drillthrough,
+                interactions,
                 visuals,
             }
         })
-        .collect()
-}
-
-fn bookmark_hidden_visuals(root: &Value) -> HashMap<String, HashSet<String>> {
-    let config = embedded_json(root.get("config"));
-    let mut candidates: HashMap<String, (usize, HashSet<String>)> = HashMap::new();
-    let Some(bookmarks) = config.get("bookmarks").and_then(Value::as_array) else {
-        return HashMap::new();
-    };
-
-    for bookmark in bookmarks {
-        let state = bookmark.get("explorationState").unwrap_or(&Value::Null);
-        let section = text(state, "activeSection");
-        let Some(visuals) = state
-            .pointer(&format!("/sections/{section}/visualContainers"))
-            .and_then(Value::as_object)
-        else {
-            continue;
-        };
-        let hidden = visuals
-            .iter()
-            .filter_map(|(name, value)| {
-                (value
-                    .pointer("/singleVisual/display/mode")
-                    .and_then(Value::as_str)
-                    == Some("hidden"))
-                .then(|| name.clone())
-            })
-            .collect::<HashSet<_>>();
-        if hidden.is_empty() {
-            continue;
-        }
-        // A PBIX stores bookmark-controlled alternatives in the page alongside the
-        // currently useful visuals. Rendering every alternative at once creates
-        // stacked maps, tables, and popup panels. The state hiding the most layers
-        // is the safest neutral preview; ties retain the report author's first state.
-        let score = hidden.len();
-        if candidates
-            .get(&section)
-            .is_none_or(|(best, _)| score > *best)
-        {
-            candidates.insert(section, (score, hidden));
-        }
-    }
-
-    candidates
-        .into_iter()
-        .map(|(section, (_, hidden))| (section, hidden))
         .collect()
 }
 
@@ -816,10 +898,48 @@ fn parse_visual(
         .and_then(Value::as_str)
         .unwrap_or("visual")
         .to_string();
+    let prototype_query = config
+        .pointer("/singleVisual/prototypeQuery")
+        .cloned()
+        .unwrap_or(Value::Null);
+    let aggregations = parse_aggregations(&prototype_query, &data);
+    let resolved_filters = parse_resolved_filters(&query);
+    let filters = parse_filters(
+        v.get("filters"),
+        "Visual",
+        visual_type.eq_ignore_ascii_case("slicer"),
+    );
+    let slicer_selections = parse_slicer_selections(&config);
+    let is_hidden = config
+        .pointer("/singleVisual/display/mode")
+        .and_then(Value::as_str)
+        == Some("hidden");
+    let column_labels = parse_column_labels(&config);
+    let sync_group = parse_sync_group(&config);
+    let bookmark_target = config
+        .pointer("/singleVisual/vcObjects/visualLink/0/properties/bookmark/expr/Literal/Value")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim_matches('\'')
+        .to_string();
     let mut strings = Vec::new();
-    collect_named(&config, &mut strings);
-    collect_named(&query, &mut strings);
-    collect_named(&data, &mut strings);
+    collect_bound_fields(&prototype_query, &mut strings);
+    if let Some(resolved_query) = query.pointer("/Commands/0/SemanticQueryDataShapeCommand/Query") {
+        collect_bound_fields(resolved_query, &mut strings);
+    }
+    if let Some(selects) = data.get("selects").and_then(Value::as_array) {
+        strings.extend(selects.iter().filter_map(|select| {
+            select
+                .get("queryName")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        }));
+    }
+    if strings.is_empty() {
+        collect_named(&config, &mut strings);
+        collect_named(&query, &mut strings);
+        collect_named(&data, &mut strings);
+    }
     let fields: Vec<String> = strings
         .into_iter()
         .filter(|s| !s.is_empty() && s.len() < 100)
@@ -869,6 +989,7 @@ fn parse_visual(
     let w = num(v, "width", 280.0);
     let h = num(v, "height", 160.0);
     Visual {
+        id: text(&config, "name"),
         visual_type_label: label_type(&visual_type),
         visual_type,
         title,
@@ -878,6 +999,17 @@ fn parse_visual(
         h_pct: h / page_h * 100.0,
         z_index: num(v, "z", 0.0) as i64 + offset_z,
         fields,
+        is_hidden,
+        prototype_query,
+        semantic_query: query,
+        data_transforms: data,
+        aggregations,
+        resolved_filters,
+        filters,
+        slicer_selections,
+        column_labels,
+        sync_group,
+        bookmark_target,
     }
 }
 
@@ -1109,6 +1241,589 @@ fn merge_report_measure_tables(tables: &mut Vec<Table>, report_tables: Vec<Table
     }
 }
 
+fn parse_bookmarks(root: &Value) -> Vec<BookmarkInfo> {
+    let config = embedded_json(root.get("config"));
+    config
+        .get("bookmarks")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .map(|bookmark| {
+            let state = bookmark
+                .get("explorationState")
+                .cloned()
+                .unwrap_or(Value::Null);
+            BookmarkInfo {
+                name: nonempty(text(bookmark, "displayName"), "Unnamed bookmark"),
+                id: text(bookmark, "name"),
+                active_page: text(&state, "activeSection"),
+                hidden_visual_count: count_string_value(&state, "mode", "hidden"),
+                filter_count: count_json_key(&state, "filter"),
+                state,
+            }
+        })
+        .collect()
+}
+
+fn count_mobile_layouts(root: &Value) -> usize {
+    let config = embedded_json(root.get("config"));
+    config
+        .get("layouts")
+        .or_else(|| root.get("layouts"))
+        .and_then(Value::as_array)
+        .map(Vec::len)
+        .unwrap_or_default()
+}
+
+fn count_json_key(value: &Value, key: &str) -> usize {
+    match value {
+        Value::Object(map) => {
+            usize::from(map.contains_key(key))
+                + map
+                    .values()
+                    .map(|value| count_json_key(value, key))
+                    .sum::<usize>()
+        }
+        Value::Array(values) => values.iter().map(|value| count_json_key(value, key)).sum(),
+        _ => 0,
+    }
+}
+
+fn count_string_value(value: &Value, key: &str, expected: &str) -> usize {
+    match value {
+        Value::Object(map) => {
+            usize::from(map.get(key).and_then(Value::as_str) == Some(expected))
+                + map
+                    .values()
+                    .map(|value| count_string_value(value, key, expected))
+                    .sum::<usize>()
+        }
+        Value::Array(values) => values
+            .iter()
+            .map(|value| count_string_value(value, key, expected))
+            .sum(),
+        _ => 0,
+    }
+}
+
+fn parse_interactions(section_config: &Value) -> Vec<InteractionInfo> {
+    section_config
+        .get("relationships")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .map(|relationship| {
+            let interaction_type = relationship
+                .get("type")
+                .and_then(Value::as_i64)
+                .unwrap_or_default();
+            InteractionInfo {
+                source: text(relationship, "source"),
+                target: text(relationship, "target"),
+                interaction_type,
+                behavior: match interaction_type {
+                    1 => "Filter",
+                    3 => "No filter",
+                    _ => "Other",
+                }
+                .into(),
+            }
+        })
+        .collect()
+}
+
+fn parse_resolved_filters(semantic_query: &Value) -> Vec<FilterInfo> {
+    let query = semantic_query
+        .pointer("/Commands/0/SemanticQueryDataShapeCommand/Query")
+        .unwrap_or(&Value::Null);
+    let aliases = query
+        .get("From")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|source| {
+            Some((
+                source.get("Name")?.as_str()?.to_string(),
+                source.get("Entity")?.as_str()?.to_string(),
+            ))
+        })
+        .collect::<HashMap<_, _>>();
+    query
+        .get("Where")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .map(|where_clause| {
+            let mut expression = render_filter_expression(where_clause);
+            let mut ordered_aliases = aliases.iter().collect::<Vec<_>>();
+            ordered_aliases.sort_by_key(|(alias, _)| std::cmp::Reverse(alias.len()));
+            for (alias, entity) in ordered_aliases {
+                expression = expression.replace(&format!("{alias}["), &format!("{entity}["));
+            }
+            FilterInfo {
+                scope: "Cached merged query".into(),
+                target: expression.clone(),
+                kind: "Resolved Where".into(),
+                expression,
+                active: true,
+                note: "Already merged by Power BI when this visual was last run in Desktop.".into(),
+            }
+        })
+        .collect()
+}
+
+fn parse_column_labels(config: &Value) -> Vec<ColumnLabel> {
+    config
+        .pointer("/singleVisual/columnProperties")
+        .and_then(Value::as_object)
+        .into_iter()
+        .flatten()
+        .filter_map(|(query_ref, properties)| {
+            let display_name = properties.get("displayName")?.as_str()?;
+            Some(ColumnLabel {
+                query_ref: query_ref.clone(),
+                display_name: display_name.into(),
+            })
+        })
+        .collect()
+}
+
+fn parse_sync_group(config: &Value) -> Option<SyncGroupInfo> {
+    let group = config.pointer("/singleVisual/syncGroup")?;
+    Some(SyncGroupInfo {
+        group_name: text(group, "groupName"),
+        field_changes: group
+            .get("fieldChanges")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        filter_changes: group
+            .get("filterChanges")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+    })
+}
+
+fn parse_diagram_tables(root: &Value) -> Vec<String> {
+    root.get("diagrams")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|diagram| diagram.get("nodes").and_then(Value::as_array))
+        .flatten()
+        .filter_map(|node| node.get("nodeIndex").and_then(Value::as_str))
+        .filter(|name| !name.trim().is_empty())
+        .map(str::to_string)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn merge_diagram_tables(tables: &mut Vec<Table>, diagram_tables: Vec<String>) {
+    let mut existing = tables
+        .iter()
+        .map(|table| table.name.clone())
+        .collect::<HashSet<_>>();
+    tables.extend(
+        diagram_tables
+            .into_iter()
+            .filter(|name| existing.insert(name.clone()))
+            .map(|name| Table {
+                name,
+                columns: Vec::new(),
+                row_count: None,
+                is_hidden: false,
+                description: "Table name from DiagramLayout; live model details are stored on the remote model.".into(),
+                expression: String::new(),
+            }),
+    );
+}
+
+fn dax_query_display_name(path: &str) -> String {
+    path.replace('\\', "/")
+        .rsplit('/')
+        .next()
+        .unwrap_or(path)
+        .replace("%20", " ")
+        .replace("%23", "#")
+        .trim_end_matches(".dax")
+        .to_string()
+}
+
+fn apply_dax_query_metadata(queries: &mut [DaxQuery], metadata: Option<&str>) {
+    let Some(root) = metadata.and_then(|value| serde_json::from_str::<Value>(value).ok()) else {
+        return;
+    };
+    let order = find_json_key(&root, "tabOrder")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(dax_query_display_name)
+        .collect::<Vec<_>>();
+    let default = find_json_key(&root, "defaultTab")
+        .and_then(Value::as_str)
+        .map(dax_query_display_name);
+    queries.sort_by_key(|query| {
+        order
+            .iter()
+            .position(|name| name.eq_ignore_ascii_case(&query.name))
+            .unwrap_or(usize::MAX)
+    });
+    if let Some(default) = default {
+        for query in queries {
+            query.is_default = query.name.eq_ignore_ascii_case(&default);
+        }
+    }
+}
+
+fn find_json_key<'a>(value: &'a Value, key: &str) -> Option<&'a Value> {
+    match value {
+        Value::Object(map) => map
+            .get(key)
+            .or_else(|| map.values().find_map(|value| find_json_key(value, key))),
+        Value::Array(values) => values.iter().find_map(|value| find_json_key(value, key)),
+        _ => None,
+    }
+}
+
+fn parse_aggregations(prototype_query: &Value, data_transforms: &Value) -> Vec<AggregationInfo> {
+    let aliases = prototype_query
+        .get("From")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|source| {
+            Some((
+                source.get("Name")?.as_str()?.to_string(),
+                source.get("Entity")?.as_str()?.to_string(),
+            ))
+        })
+        .collect::<HashMap<_, _>>();
+    prototype_query
+        .get("Select")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .enumerate()
+        .filter_map(|(index, selection)| {
+            let aggregation = selection.get("Aggregation")?;
+            let function_code = aggregation.get("Function")?.as_i64()?;
+            let display_name = data_transforms
+                .get("selects")
+                .and_then(Value::as_array)
+                .and_then(|selects| selects.get(index))
+                .and_then(|select| select.get("displayName"))
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            Some(AggregationInfo {
+                field: render_query_expression(
+                    aggregation.get("Expression").unwrap_or(&Value::Null),
+                    &aliases,
+                ),
+                function_code,
+                function_name: match function_code {
+                    0 => "Sum",
+                    1 => "Average",
+                    _ => "Use packaged display label",
+                }
+                .into(),
+                native_name: selection
+                    .get("NativeReferenceName")
+                    .or_else(|| selection.get("Name"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+                display_name,
+            })
+        })
+        .collect()
+}
+
+fn render_query_expression(node: &Value, aliases: &HashMap<String, String>) -> String {
+    if let Some(column) = node.get("Column") {
+        let source = column
+            .pointer("/Expression/SourceRef/Entity")
+            .or_else(|| column.pointer("/Expression/SourceRef/Source"))
+            .and_then(Value::as_str)
+            .unwrap_or("?");
+        let entity = aliases.get(source).map(String::as_str).unwrap_or(source);
+        return format!("{entity}[{}]", text(column, "Property"));
+    }
+    if let Some(measure) = node.get("Measure") {
+        let source = measure
+            .pointer("/Expression/SourceRef/Entity")
+            .or_else(|| measure.pointer("/Expression/SourceRef/Source"))
+            .and_then(Value::as_str)
+            .unwrap_or("?");
+        let entity = aliases.get(source).map(String::as_str).unwrap_or(source);
+        return format!("{entity}[{}]", text(measure, "Property"));
+    }
+    if let Some(aggregation) = node.get("Aggregation") {
+        return render_query_expression(
+            aggregation.get("Expression").unwrap_or(&Value::Null),
+            aliases,
+        );
+    }
+    compact_json(node)
+}
+
+fn parse_filters(value: Option<&Value>, scope: &str, slicer_value_list: bool) -> Vec<FilterInfo> {
+    let decoded = embedded_json(value);
+    let Some(filters) = decoded.as_array() else {
+        return Vec::new();
+    };
+    filters
+        .iter()
+        .map(|filter| {
+            let body = filter.get("filter").unwrap_or(&Value::Null);
+            let active = has_filter_predicate(body);
+            FilterInfo {
+                scope: scope.into(),
+                target: render_filter_expression(filter.get("expression").unwrap_or(&Value::Null)),
+                kind: text(filter, "type"),
+                expression: if active {
+                    render_filter_expression(body)
+                } else {
+                    "No predicate (inactive placeholder)".into()
+                },
+                active,
+                note: if slicer_value_list {
+                    "Restricts this slicer's value list; it does not filter the page.".into()
+                } else {
+                    String::new()
+                },
+            }
+        })
+        .collect()
+}
+
+fn parse_slicer_selections(config: &Value) -> Vec<FilterInfo> {
+    [
+        "/singleVisual/objects/general",
+        "/singleVisual/vcObjects/general",
+    ]
+    .into_iter()
+    .filter_map(|pointer| config.pointer(pointer).and_then(Value::as_array))
+    .flatten()
+    .filter_map(|item| item.pointer("/properties/filter"))
+    .map(|selection| {
+        let body = selection.get("filter").unwrap_or(selection);
+        FilterInfo {
+            scope: "Slicer selection".into(),
+            target: "Saved selection".into(),
+            kind: "Selection".into(),
+            expression: render_filter_expression(body),
+            active: has_filter_predicate(body),
+            note: "Applies to the page through the slicer.".into(),
+        }
+    })
+    .collect()
+}
+
+fn has_filter_predicate(node: &Value) -> bool {
+    match node {
+        Value::Null => false,
+        Value::Array(values) => values.iter().any(has_filter_predicate),
+        Value::Object(map) => {
+            if let Some(where_clause) = map.get("Where") {
+                return has_filter_predicate(where_clause);
+            }
+            map.iter().any(|(key, value)| {
+                !matches!(key.as_str(), "Version" | "From") && has_filter_predicate(value)
+            })
+        }
+        Value::String(value) => !value.is_empty(),
+        _ => true,
+    }
+}
+
+fn render_filter_expression(node: &Value) -> String {
+    if node.is_null() {
+        return String::new();
+    }
+    if let Some(literal) = node.get("Literal") {
+        return literal
+            .get("Value")
+            .map(|value| {
+                value
+                    .as_str()
+                    .map(str::to_string)
+                    .unwrap_or_else(|| value.to_string())
+            })
+            .unwrap_or_default();
+    }
+    if let Some(column) = node.get("Column") {
+        let entity = column
+            .pointer("/Expression/SourceRef/Entity")
+            .or_else(|| column.pointer("/Expression/SourceRef/Source"))
+            .and_then(Value::as_str)
+            .unwrap_or("?");
+        return format!("{entity}[{}]", text(column, "Property"));
+    }
+    if let Some(measure) = node.get("Measure") {
+        let entity = measure
+            .pointer("/Expression/SourceRef/Entity")
+            .or_else(|| measure.pointer("/Expression/SourceRef/Source"))
+            .and_then(Value::as_str)
+            .unwrap_or("?");
+        return format!("{entity}[{}] (measure)", text(measure, "Property"));
+    }
+    if let Some(level) = node.get("HierarchyLevel") {
+        let entity = level
+            .pointer("/Expression/Hierarchy/Expression/SourceRef/Entity")
+            .or_else(|| level.pointer("/Expression/Hierarchy/Expression/SourceRef/Source"))
+            .and_then(Value::as_str)
+            .unwrap_or("?");
+        return format!("{entity}[{}]", text(level, "Level"));
+    }
+    if let Some(aggregation) = node.get("Aggregation") {
+        let code = aggregation
+            .get("Function")
+            .and_then(Value::as_i64)
+            .unwrap_or(-1);
+        return format!(
+            "Aggregation {code}({})",
+            render_filter_expression(aggregation.get("Expression").unwrap_or(&Value::Null))
+        );
+    }
+    if node.get("Now").is_some() {
+        return "Now()".into();
+    }
+    if let Some(date_add) = node.get("DateAdd") {
+        let units = ["Day", "Week", "Month", "Year", "Hour", "Minute", "Second"];
+        let unit = date_add
+            .get("TimeUnit")
+            .and_then(Value::as_u64)
+            .and_then(|index| units.get(index as usize))
+            .copied()
+            .unwrap_or("Unit");
+        return format!(
+            "DateAdd({}, {} {unit})",
+            render_filter_expression(date_add.get("Expression").unwrap_or(&Value::Null)),
+            date_add.get("Amount").and_then(Value::as_i64).unwrap_or(0)
+        );
+    }
+    if let Some(date_span) = node.get("DateSpan") {
+        let units = ["Day", "Week", "Month", "Year", "Hour", "Minute", "Second"];
+        let unit = date_span
+            .get("TimeUnit")
+            .and_then(Value::as_u64)
+            .and_then(|index| units.get(index as usize))
+            .copied()
+            .unwrap_or("Unit");
+        return format!(
+            "TruncTo{unit}({})",
+            render_filter_expression(date_span.get("Expression").unwrap_or(&Value::Null))
+        );
+    }
+    if let Some(in_clause) = node.get("In") {
+        let expressions = render_expression_list(in_clause.get("Expressions"));
+        let values = in_clause
+            .get("Values")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .map(|row| render_expression_list(Some(row)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        return format!("{expressions} IN ({values})");
+    }
+    if let Some(not) = node.get("Not") {
+        return format!(
+            "NOT ({})",
+            render_filter_expression(not.get("Expression").unwrap_or(&Value::Null))
+        );
+    }
+    if let Some(between) = node.get("Between") {
+        return format!(
+            "{} BETWEEN {} AND {}",
+            render_filter_expression(between.get("Expression").unwrap_or(&Value::Null)),
+            render_filter_expression(between.get("LowerBound").unwrap_or(&Value::Null)),
+            render_filter_expression(between.get("UpperBound").unwrap_or(&Value::Null))
+        );
+    }
+    if let Some(comparison) = node.get("Comparison") {
+        let operators = ["=", ">", ">=", "<", "<="];
+        let operator = comparison
+            .get("ComparisonKind")
+            .and_then(Value::as_u64)
+            .and_then(|index| operators.get(index as usize))
+            .copied()
+            .unwrap_or("?");
+        return format!(
+            "{} {operator} {}",
+            render_filter_expression(comparison.get("Left").unwrap_or(&Value::Null)),
+            render_filter_expression(comparison.get("Right").unwrap_or(&Value::Null))
+        );
+    }
+    if let Some(arithmetic) = node.get("Arithmetic") {
+        let operators = ["+", "-", "*", "/"];
+        let operator = arithmetic
+            .get("Operator")
+            .and_then(Value::as_u64)
+            .and_then(|index| operators.get(index as usize))
+            .copied()
+            .unwrap_or("?");
+        return format!(
+            "({}) {operator} ({})",
+            render_filter_expression(arithmetic.get("Left").unwrap_or(&Value::Null)),
+            render_filter_expression(arithmetic.get("Right").unwrap_or(&Value::Null))
+        );
+    }
+    if let Some(scoped) = node.get("ScopedEval") {
+        let scope = scoped
+            .get("Scope")
+            .map(compact_json)
+            .unwrap_or_else(|| "[]".into());
+        return format!(
+            "ScopedEval({}, Scope: {scope})",
+            render_filter_expression(scoped.get("Expression").unwrap_or(&Value::Null))
+        );
+    }
+    for operator in ["And", "Or"] {
+        if let Some(branch) = node.get(operator) {
+            return format!(
+                "({}) {operator} ({})",
+                render_filter_expression(branch.get("Left").unwrap_or(&Value::Null)),
+                render_filter_expression(branch.get("Right").unwrap_or(&Value::Null))
+            );
+        }
+    }
+    if let Some(condition) = node.get("Condition") {
+        return render_filter_expression(condition);
+    }
+    if let Some(where_clause) = node.get("Where") {
+        return render_expression_list(Some(where_clause));
+    }
+    if let Some(expression) = node.get("Expression") {
+        return render_filter_expression(expression);
+    }
+    compact_json(node)
+}
+
+fn render_expression_list(value: Option<&Value>) -> String {
+    match value {
+        Some(Value::Array(values)) => values
+            .iter()
+            .map(render_filter_expression)
+            .filter(|value| !value.is_empty())
+            .collect::<Vec<_>>()
+            .join(" AND "),
+        Some(value) => render_filter_expression(value),
+        None => String::new(),
+    }
+}
+
+fn compact_json(value: &Value) -> String {
+    let rendered = serde_json::to_string(value).unwrap_or_default();
+    if rendered.chars().count() > 400 {
+        format!("{}…", rendered.chars().take(400).collect::<String>())
+    } else {
+        rendered
+    }
+}
+
 fn parse_sources(root: Value) -> Vec<Source> {
     let mut found = Vec::new();
     collect_sources(&root, "", &mut found);
@@ -1118,6 +1833,37 @@ fn parse_sources(root: Value) -> Vec<Source> {
         .filter(|s| seen.insert(s.detail.clone()))
         .take(50)
         .collect()
+}
+
+fn parse_aas_connection(root: &Value) -> Option<AasConnection> {
+    let connection = root
+        .get("Connections")
+        .and_then(Value::as_array)?
+        .iter()
+        .find(|connection| {
+            text(connection, "ConnectionType").eq_ignore_ascii_case("analysisServicesDatabaseLive")
+        })?;
+    let connection_string = connection.get("ConnectionString")?.as_str()?;
+    let mut properties = HashMap::new();
+    for part in connection_string.split(';') {
+        let Some((key, value)) = part.split_once('=') else {
+            continue;
+        };
+        properties.insert(
+            key.trim().to_ascii_lowercase(),
+            value.trim().trim_matches('"').to_string(),
+        );
+    }
+    let server_url = properties.get("data source")?.clone();
+    Some(AasConnection {
+        server_url,
+        catalog: properties
+            .get("initial catalog")
+            .cloned()
+            .unwrap_or_default(),
+        cube: properties.get("cube").cloned().unwrap_or_default(),
+        connection_type: text(connection, "ConnectionType"),
+    })
 }
 fn parse_mashup(bytes: &[u8]) -> (Vec<Query>, Vec<Source>) {
     if bytes.len() < 12 {
@@ -1430,6 +2176,68 @@ fn collect_named(v: &Value, out: &mut Vec<String>) {
         _ => {}
     }
 }
+
+fn collect_bound_fields(query: &Value, out: &mut Vec<String>) {
+    let aliases = query
+        .get("From")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|source| {
+            Some((
+                source.get("Name")?.as_str()?.to_string(),
+                source.get("Entity")?.as_str()?.to_string(),
+            ))
+        })
+        .collect::<HashMap<_, _>>();
+    collect_bound_fields_inner(query, &aliases, out);
+}
+
+fn collect_bound_fields_inner(
+    node: &Value,
+    aliases: &HashMap<String, String>,
+    out: &mut Vec<String>,
+) {
+    match node {
+        Value::Object(map) => {
+            for key in ["Column", "Measure"] {
+                if let Some(field) = map.get(key) {
+                    let source = field
+                        .pointer("/Expression/SourceRef/Entity")
+                        .or_else(|| field.pointer("/Expression/SourceRef/Source"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("?");
+                    let entity = aliases.get(source).map(String::as_str).unwrap_or(source);
+                    let property = field.get("Property").and_then(Value::as_str).unwrap_or("");
+                    if !property.is_empty() {
+                        out.push(format!("{entity}[{property}]"));
+                    }
+                }
+            }
+            if let Some(level) = map.get("HierarchyLevel") {
+                let source = level
+                    .pointer("/Expression/Hierarchy/Expression/SourceRef/Entity")
+                    .or_else(|| level.pointer("/Expression/Hierarchy/Expression/SourceRef/Source"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("?");
+                let entity = aliases.get(source).map(String::as_str).unwrap_or(source);
+                let name = level.get("Level").and_then(Value::as_str).unwrap_or("");
+                if !name.is_empty() {
+                    out.push(format!("{entity}[{name}]"));
+                }
+            }
+            for value in map.values() {
+                collect_bound_fields_inner(value, aliases, out);
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                collect_bound_fields_inner(value, aliases, out);
+            }
+        }
+        _ => {}
+    }
+}
 fn text(v: &Value, key: &str) -> String {
     v.get(key).and_then(Value::as_str).unwrap_or("").to_string()
 }
@@ -1572,5 +2380,238 @@ mod tests {
         assert_eq!(tables[0].columns.len(), 2);
         assert_eq!(tables[0].columns[0].expression, "1");
         assert_eq!(tables[0].columns[1].name, "Report only");
+    }
+
+    #[test]
+    fn reads_visual_aggregation_without_trusting_the_stale_name() {
+        let query = serde_json::json!({
+            "From": [{ "Name": "f", "Entity": "FactSLHospitalization" }],
+            "Select": [{
+                "Aggregation": {
+                    "Expression": {
+                        "Column": {
+                            "Expression": { "SourceRef": { "Source": "f" } },
+                            "Property": "NumberOfDaysInHospital"
+                        }
+                    },
+                    "Function": 1
+                },
+                "Name": "Sum(FactSLHospitalization.NumberOfDaysInHospital)",
+                "NativeReferenceName": "Average of NumberOfDaysInHospital"
+            }]
+        });
+
+        let data_transforms = serde_json::json!({
+            "selects": [{ "displayName": "Average of NumberOfDaysInHospital" }]
+        });
+        let aggregations = parse_aggregations(&query, &data_transforms);
+
+        assert_eq!(aggregations.len(), 1);
+        assert_eq!(
+            aggregations[0].field,
+            "FactSLHospitalization[NumberOfDaysInHospital]"
+        );
+        assert_eq!(aggregations[0].function_code, 1);
+        assert_eq!(aggregations[0].function_name, "Average");
+        assert_eq!(
+            aggregations[0].native_name,
+            "Average of NumberOfDaysInHospital"
+        );
+        assert_eq!(
+            aggregations[0].display_name,
+            "Average of NumberOfDaysInHospital"
+        );
+    }
+
+    #[test]
+    fn resolves_visual_bindings_and_cached_where_aliases() {
+        let prototype = serde_json::json!({
+            "From": [{ "Name": "f", "Entity": "Fact Stay" }],
+            "Select": [{
+                "Measure": {
+                    "Expression": { "SourceRef": { "Source": "f" } },
+                    "Property": "Hospitalizations"
+                }
+            }]
+        });
+        let mut fields = Vec::new();
+        collect_bound_fields(&prototype, &mut fields);
+        assert_eq!(fields, vec!["Fact Stay[Hospitalizations]"]);
+
+        let cached = serde_json::json!({
+            "Commands": [{
+                "SemanticQueryDataShapeCommand": {
+                    "Query": {
+                        "From": [{ "Name": "f", "Entity": "Fact Stay" }],
+                        "Where": [{
+                            "Condition": {
+                                "Comparison": {
+                                    "ComparisonKind": 0,
+                                    "Left": {
+                                        "Column": {
+                                            "Expression": { "SourceRef": { "Source": "f" } },
+                                            "Property": "Active"
+                                        }
+                                    },
+                                    "Right": { "Literal": { "Value": "true" } }
+                                }
+                            }
+                        }]
+                    }
+                }
+            }]
+        });
+        let filters = parse_resolved_filters(&cached);
+        assert_eq!(filters.len(), 1);
+        assert_eq!(filters[0].expression, "Fact Stay[Active] = true");
+    }
+
+    #[test]
+    fn renders_arithmetic_and_scoped_filter_expressions() {
+        let expression = serde_json::json!({
+            "ScopedEval": {
+                "Expression": {
+                    "Arithmetic": {
+                        "Operator": 3,
+                        "Left": { "Literal": { "Value": "10" } },
+                        "Right": { "Literal": { "Value": "2" } }
+                    }
+                },
+                "Scope": ["Visual"]
+            }
+        });
+        let rendered = render_filter_expression(&expression);
+        assert!(rendered.contains("(10) / (2)"));
+        assert!(rendered.contains("ScopedEval"));
+    }
+
+    #[test]
+    fn reads_exact_live_connection_values() {
+        let connections = serde_json::json!({
+            "Connections": [{
+                "ConnectionString": "Data Source=asazure://region.asazure.windows.net/server;Initial Catalog=\"Exact Catalog \";Cube=ExactCube;Access Mode=readonly",
+                "ConnectionType": "analysisServicesDatabaseLive"
+            }]
+        });
+        let connection = parse_aas_connection(&connections).unwrap();
+        assert_eq!(connection.catalog, "Exact Catalog ");
+        assert_eq!(connection.cube, "ExactCube");
+    }
+
+    #[test]
+    fn distinguishes_slicer_value_restrictions_from_saved_selections() {
+        let filters = serde_json::json!([{
+            "expression": {
+                "Column": {
+                    "Expression": { "SourceRef": { "Entity": "DimDischargeLocation" } },
+                    "Property": "AcuteCareInd"
+                }
+            },
+            "type": "Categorical",
+            "filter": {
+                "Where": [{
+                    "Condition": {
+                        "In": {
+                            "Expressions": [{
+                                "Column": {
+                                    "Expression": { "SourceRef": { "Source": "d" } },
+                                    "Property": "AcuteCareInd"
+                                }
+                            }],
+                            "Values": [[{ "Literal": { "Value": "true" } }]]
+                        }
+                    }
+                }]
+            }
+        }]);
+        let encoded_filters = Value::String(filters.to_string());
+        let parsed = parse_filters(Some(&encoded_filters), "Visual", true);
+        let config = serde_json::json!({
+            "singleVisual": {
+                "objects": {
+                    "general": [{
+                        "properties": {
+                            "filter": {
+                                "filter": {
+                                    "Where": [{
+                                        "Condition": {
+                                            "In": {
+                                                "Expressions": [{
+                                                    "Column": {
+                                                        "Expression": { "SourceRef": { "Source": "d" } },
+                                                        "Property": "ReportingGroupName"
+                                                    }
+                                                }],
+                                                "Values": [[{ "Literal": { "Value": "'All Communities'" } }]]
+                                            }
+                                        }
+                                    }]
+                                }
+                            }
+                        }
+                    }]
+                }
+            }
+        });
+        let selections = parse_slicer_selections(&config);
+
+        assert_eq!(parsed.len(), 1);
+        assert!(parsed[0].active);
+        assert!(parsed[0].note.contains("does not filter the page"));
+        assert_eq!(selections.len(), 1);
+        assert!(selections[0].note.contains("Applies to the page"));
+        assert!(selections[0].expression.contains("All Communities"));
+    }
+
+    #[test]
+    fn adds_live_model_table_names_from_diagram_layout() {
+        let layout = serde_json::json!({
+            "diagrams": [{
+                "nodes": [
+                    { "nodeIndex": "FactSLHospitalization" },
+                    { "nodeIndex": "DimSLFacility" },
+                    { "nodeIndex": "FactSLHospitalization" }
+                ]
+            }]
+        });
+        let names = parse_diagram_tables(&layout);
+        let mut tables = Vec::new();
+
+        merge_diagram_tables(&mut tables, names);
+
+        assert_eq!(tables.len(), 2);
+        assert_eq!(tables[0].name, "DimSLFacility");
+        assert_eq!(tables[1].name, "FactSLHospitalization");
+        assert!(tables[0].description.contains("DiagramLayout"));
+    }
+
+    #[test]
+    fn applies_saved_dax_tab_order_and_default_metadata() {
+        let mut queries = vec![
+            DaxQuery {
+                name: "Second".into(),
+                path: "DAXQueries/Second.dax".into(),
+                expression: "EVALUATE { 2 }".into(),
+                is_default: false,
+            },
+            DaxQuery {
+                name: "First".into(),
+                path: "DAXQueries/First.dax".into(),
+                expression: "EVALUATE { 1 }".into(),
+                is_default: false,
+            },
+        ];
+        let metadata = serde_json::json!({
+            "state": {
+                "tabOrder": ["First", "Second"],
+                "defaultTab": "Second"
+            }
+        });
+
+        apply_dax_query_metadata(&mut queries, Some(&metadata.to_string()));
+
+        assert_eq!(queries[0].name, "First");
+        assert_eq!(queries[1].name, "Second");
+        assert!(queries[1].is_default);
     }
 }
