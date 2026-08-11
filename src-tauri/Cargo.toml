@@ -1,6 +1,6 @@
 [package]
 name = "pbi-lens"
-version = "0.1.5"
+version = "0.1.6"
 description = "A fast, local Power BI file explorer for macOS"
 authors = ["PBI Lens"]
 edition = "2021"
