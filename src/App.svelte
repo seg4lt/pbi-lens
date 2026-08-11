@@ -253,6 +253,21 @@
     };
   }
 
+  function hasVisualQuery(visual) {
+    return Boolean(
+      (visual?.prototype_query && Object.keys(visual.prototype_query).length) ||
+      (visual?.semantic_query && Object.keys(visual.semantic_query).length) ||
+      (visual?.data_transforms && Object.keys(visual.data_transforms).length)
+    );
+  }
+
+  function openExplainedVisualQuery() {
+    const visual = visualExplanation?.visual;
+    if (!visual) return;
+    visualExplanation = null;
+    openVisualQuery(visual);
+  }
+
   function openBookmark(bookmark) {
     fieldDialog = {
       kind: 'BOOKMARK STATE',
@@ -383,6 +398,8 @@
     visualExplanation = {
       title: visual.title || visual.visual_type_label || 'Visual',
       type: visual.visual_type_label,
+      visual,
+      hasQuery: hasVisualQuery(visual),
       summary,
       calculations,
       resolvedFilters,
@@ -841,7 +858,7 @@
                 {@const bookmark = report.bookmarks?.find((item) => item.id === selectedVisual.bookmark_target)}
                 <button class="inspector-action query-action" onclick={() => bookmark && openBookmark(bookmark)}>BOOKMARK → {bookmark?.name || selectedVisual.bookmark_target}</button>
               {/if}
-              {#if (selectedVisual.prototype_query && Object.keys(selectedVisual.prototype_query).length) || (selectedVisual.semantic_query && Object.keys(selectedVisual.semantic_query).length)}
+              {#if hasVisualQuery(selectedVisual)}
                 <button class="inspector-action query-action" onclick={() => openVisualQuery(selectedVisual)}>VIEW SEMANTIC QUERY</button>
               {/if}
               <button class="inspector-action" onclick={() => copyText(JSON.stringify(selectedVisual, null, 2), 'visual')}>{copied === 'visual' ? 'COPIED' : 'COPY VISUAL METADATA'}</button>
@@ -1143,7 +1160,12 @@
               <div class="explain-list">{#each visualExplanation.unknowns as unknown}<article><span class="confidence unknown">UNKNOWN</span><p>{unknown}</p></article>{/each}</div>
             </section>
           </div>
-          <footer><span>No business meaning or current value is guessed.</span><button onclick={() => copyText(explanationMarkdown(visualExplanation), 'visual-explanation')}>{copied === 'visual-explanation' ? 'COPIED' : 'COPY DEBUG REPORT'}</button><button class="primary" onclick={() => visualExplanation = null}>DONE</button></footer>
+          <footer>
+            <span>{visualExplanation.hasQuery ? 'The packaged query can be inspected exactly.' : 'No query payload was packaged for this visual.'}</span>
+            {#if visualExplanation.hasQuery}<button class="query-view" onclick={openExplainedVisualQuery}>VIEW QUERY</button>{/if}
+            <button onclick={() => copyText(explanationMarkdown(visualExplanation), 'visual-explanation')}>{copied === 'visual-explanation' ? 'COPIED' : 'COPY DEBUG REPORT'}</button>
+            <button class="primary" onclick={() => visualExplanation = null}>DONE</button>
+          </footer>
         </div>
       </dialog>
     {/if}
