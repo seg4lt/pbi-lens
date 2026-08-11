@@ -440,7 +440,18 @@
           <button class:active={activeView === item[0]} onclick={() => selectView(item[0])} title={item[2]}><Icon name={item[1]} size={20}/><span>{item[2]}</span></button>
         {/each}
       </nav>
-      <button class="rail-open" onclick={() => openFile()} title="Open another file"><Icon name="plus" size={20}/></button>
+      <button
+        class="rail-update"
+        class:busy={updateStatus === 'checking' || updateStatus === 'downloading' || updateStatus === 'installing'}
+        class:available={availableUpdate}
+        onclick={() => checkForUpdate(true)}
+        disabled={updateStatus === 'checking' || updateStatus === 'downloading' || updateStatus === 'installing'}
+        title={updateStatus === 'checking' ? 'Checking for updates…' : updateStatus === 'current' ? 'PBI Lens is up to date' : updateStatus === 'error' ? `Update check failed: ${updateError}` : availableUpdate ? `Update ${availableUpdate.version} available` : 'Check for updates'}
+      >
+        <Icon name={updateStatus === 'current' ? 'check' : 'download'} size={20}/>
+        <span>{updateStatus === 'checking' ? 'Checking' : updateStatus === 'current' ? 'Current' : updateStatus === 'error' ? 'Retry' : availableUpdate ? 'Update' : 'Updates'}</span>
+        {#if availableUpdate}<i></i>{/if}
+      </button>
     </aside>
 
     <section class="workspace">

@@ -273,10 +273,13 @@ pub fn parse_report(path: &Path) -> Result<ReportFile, String> {
             }
         }
     }
-    let pages = layout
+    let layout_json = layout
         .as_deref()
-        .and_then(|s| serde_json::from_str::<Value>(s).ok())
-        .map(parse_pages)
+        .and_then(|s| serde_json::from_str::<Value>(s).ok());
+    let pages = layout_json.clone().map(parse_pages).unwrap_or_default();
+    let report_measure_tables = layout_json
+        .as_ref()
+        .map(parse_report_measure_tables)
         .unwrap_or_default();
     let (mut tables, mut relationships) = schema
         .as_deref()
@@ -344,6 +347,7 @@ pub fn parse_report(path: &Path) -> Result<ReportFile, String> {
             Err(error) => deep_error = error,
         }
     }
+    merge_report_measure_tables(&mut tables, report_measure_tables);
     let visual_count = pages.iter().map(|p| p.visuals.len()).sum();
     Ok(ReportFile {
         path: path.to_string_lossy().into_owned(),
@@ -1017,6 +1021,94 @@ fn parse_model(root: Value) -> (Vec<Table>, Vec<Relationship>) {
     (tables, relationships)
 }
 
+/// Report measures are stored in `Report/Layout.config.modelExtensions`, not in
+/// the semantic model, for thin/live-connected reports. Those packages often
+/// have no DataModel or DataModelSchema at all, so omitting this source makes a
+/// report with valid DAX appear to have an empty model.
+fn parse_report_measure_tables(root: &Value) -> Vec<Table> {
+    let config = embedded_json(root.get("config"));
+    let Some(extensions) = config.get("modelExtensions").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    let mut tables: Vec<Table> = Vec::new();
+    for entity in extensions
+        .iter()
+        .filter_map(|extension| extension.get("entities").and_then(Value::as_array))
+        .flatten()
+    {
+        let table_name = nonempty(text(entity, "name"), "Report measures");
+        let Some(measures) = entity.get("measures").and_then(Value::as_array) else {
+            continue;
+        };
+        let table = if let Some(table) = tables.iter_mut().find(|table| table.name == table_name) {
+            table
+        } else {
+            tables.push(Table {
+                name: table_name,
+                columns: Vec::new(),
+                row_count: None,
+                is_hidden: false,
+                description: String::new(),
+                expression: String::new(),
+            });
+            tables
+                .last_mut()
+                .expect("report measure table was inserted")
+        };
+        for measure in measures {
+            let name = text(measure, "name");
+            if name.is_empty() {
+                continue;
+            }
+            table.columns.push(Column {
+                name,
+                data_type: "DAX".into(),
+                kind: "Report measure".into(),
+                expression: expression(measure),
+                is_hidden: measure
+                    .get("hidden")
+                    .or_else(|| measure.get("isHidden"))
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+                description: text(measure, "description"),
+                format_string: measure
+                    .pointer("/formatInformation/formatString")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+                display_folder: text(measure, "displayFolder"),
+                cardinality: None,
+                data_size: None,
+            });
+        }
+    }
+    tables.retain(|table| !table.columns.is_empty());
+    tables
+}
+
+fn merge_report_measure_tables(tables: &mut Vec<Table>, report_tables: Vec<Table>) {
+    for mut report_table in report_tables {
+        if let Some(table) = tables
+            .iter_mut()
+            .find(|table| table.name == report_table.name)
+        {
+            let existing = table
+                .columns
+                .iter()
+                .map(|column| column.name.clone())
+                .collect::<HashSet<_>>();
+            table.columns.extend(
+                report_table
+                    .columns
+                    .drain(..)
+                    .filter(|column| !existing.contains(&column.name)),
+            );
+        } else {
+            tables.push(report_table);
+        }
+    }
+}
+
 fn parse_sources(root: Value) -> Vec<Source> {
     let mut found = Vec::new();
     collect_sources(&root, "", &mut found);
@@ -1377,4 +1469,108 @@ fn label_type(s: &str) -> String {
     cs.next()
         .map(|c| c.to_uppercase().collect::<String>() + cs.as_str())
         .unwrap_or_else(|| "Visual".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reads_report_level_measures_from_stringified_layout_config() {
+        let config = serde_json::json!({
+            "modelExtensions": [{
+                "entities": [{
+                    "name": "Fact Stay",
+                    "measures": [{
+                        "name": "Hospitalizations",
+                        "expression": [
+                            "SUMX('Fact Stay', ",
+                            "IF('Fact Stay'[EDVisitInd] = 0, 1, 0))"
+                        ],
+                        "hidden": true,
+                        "formatInformation": { "formatString": "#,0" }
+                    }]
+                }]
+            }]
+        });
+        let layout = serde_json::json!({ "config": config.to_string() });
+
+        let tables = parse_report_measure_tables(&layout);
+
+        assert_eq!(tables.len(), 1);
+        assert_eq!(tables[0].name, "Fact Stay");
+        assert_eq!(tables[0].columns.len(), 1);
+        let measure = &tables[0].columns[0];
+        assert_eq!(measure.name, "Hospitalizations");
+        assert_eq!(measure.kind, "Report measure");
+        assert_eq!(
+            measure.expression,
+            "SUMX('Fact Stay', \nIF('Fact Stay'[EDVisitInd] = 0, 1, 0))"
+        );
+        assert!(measure.is_hidden);
+        assert_eq!(measure.format_string, "#,0");
+    }
+
+    #[test]
+    fn merges_report_measures_without_duplicating_model_measures() {
+        let mut tables = vec![Table {
+            name: "Measures".into(),
+            columns: vec![Column {
+                name: "Existing".into(),
+                data_type: "DAX".into(),
+                kind: "Measure".into(),
+                expression: "1".into(),
+                is_hidden: false,
+                description: String::new(),
+                format_string: String::new(),
+                display_folder: String::new(),
+                cardinality: None,
+                data_size: None,
+            }],
+            row_count: None,
+            is_hidden: false,
+            description: String::new(),
+            expression: String::new(),
+        }];
+        let report_tables = vec![Table {
+            name: "Measures".into(),
+            columns: vec![
+                Column {
+                    name: "Existing".into(),
+                    data_type: "DAX".into(),
+                    kind: "Report measure".into(),
+                    expression: "2".into(),
+                    is_hidden: false,
+                    description: String::new(),
+                    format_string: String::new(),
+                    display_folder: String::new(),
+                    cardinality: None,
+                    data_size: None,
+                },
+                Column {
+                    name: "Report only".into(),
+                    data_type: "DAX".into(),
+                    kind: "Report measure".into(),
+                    expression: "3".into(),
+                    is_hidden: false,
+                    description: String::new(),
+                    format_string: String::new(),
+                    display_folder: String::new(),
+                    cardinality: None,
+                    data_size: None,
+                },
+            ],
+            row_count: None,
+            is_hidden: false,
+            description: String::new(),
+            expression: String::new(),
+        }];
+
+        merge_report_measure_tables(&mut tables, report_tables);
+
+        assert_eq!(tables.len(), 1);
+        assert_eq!(tables[0].columns.len(), 2);
+        assert_eq!(tables[0].columns[0].expression, "1");
+        assert_eq!(tables[0].columns[1].name, "Report only");
+    }
 }
