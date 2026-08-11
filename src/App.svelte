@@ -25,6 +25,7 @@
   let entryContent = $state(null);
   let entryLoading = $state(false);
   let fieldDialog = $state(null);
+  let visualExplanation = $state(null);
   let copied = $state('');
   let querySearch = $state('');
   let tableSearch = $state('');
@@ -103,6 +104,7 @@
       dataOffset = 0;
       entryContent = null;
       fieldDialog = null;
+      visualExplanation = null;
       querySearch = '';
       tableSearch = '';
       columnSearch = '';
@@ -284,6 +286,138 @@
       ].join('\n'),
       language: 'INTERACTION'
     };
+  }
+
+  function visualExplanationLabel(visual) {
+    const type = (visual?.visual_type || '').toLowerCase();
+    if (type.includes('kpi') || type.includes('card')) return 'EXPLAIN KPI';
+    if (type.includes('table') || type.includes('matrix')) return 'EXPLAIN TABLE';
+    if (type.includes('slicer')) return 'EXPLAIN SLICER';
+    if (['chart', 'bar', 'line', 'area', 'pie', 'donut', 'scatter', 'treemap', 'funnel', 'waterfall', 'ribbon', 'map', 'gauge'].some((kind) => type.includes(kind))) return 'EXPLAIN CHART';
+    return 'EXPLAIN VISUAL';
+  }
+
+  function explainVisual(visual) {
+    const page = report.pages[activePage];
+    const calculations = [];
+    const seenFields = new Set();
+    for (const aggregation of visual.aggregations || []) {
+      const field = aggregation.field || aggregation.native_name || 'Unknown field';
+      seenFields.add(field);
+      calculations.push({
+        name: aggregation.display_name || aggregation.native_name || field,
+        detail: `${aggregation.function_name} · function code ${aggregation.function_code} · ${field}`,
+        origin: 'Implicit visual aggregation',
+        confidence: 'exact',
+        expression: ''
+      });
+    }
+    for (const field of visual.fields || []) {
+      if (seenFields.has(field)) continue;
+      seenFields.add(field);
+      const target = fieldTarget(field);
+      const table = target.tableIndex >= 0 ? report.tables[target.tableIndex] : null;
+      const column = table && target.columnIndex >= 0 ? table.columns[target.columnIndex] : null;
+      const kind = (column?.kind || '').toLowerCase();
+      let origin = 'Packaged field reference';
+      let confidence = 'exact';
+      if (kind.includes('report measure')) origin = 'Report-level DAX measure';
+      else if (kind.includes('measure') && column?.expression) origin = 'Model measure with decoded DAX';
+      else if (kind.includes('measure')) origin = 'Model-side measure reference';
+      else if (column) origin = 'Model column';
+      else {
+        origin = 'Unresolved field reference';
+        confidence = 'unknown';
+      }
+      calculations.push({
+        name: cleanName(field),
+        detail: column ? `${table.name}[${column.name}] · ${column.kind || 'field'}` : cleanName(field),
+        origin,
+        confidence,
+        expression: column?.expression || ''
+      });
+    }
+
+    const scopedFilters = [
+      ...(report.report_filters || []),
+      ...(page?.filters || []),
+      ...(visual.filters || []),
+      ...(visual.slicer_selections || [])
+    ];
+    const resolvedFilters = visual.resolved_filters || [];
+    const interactions = (page?.interactions || [])
+      .filter((item) => item.source === visual.id || item.target === visual.id)
+      .map((item) => {
+        const otherId = item.source === visual.id ? item.target : item.source;
+        const other = page?.visuals.find((candidate) => candidate.id === otherId);
+        return {
+          behavior: item.behavior,
+          direction: item.source === visual.id ? 'To' : 'From',
+          other: other?.title || other?.visual_type_label || otherId,
+          type: item.interaction_type
+        };
+      });
+    const bookmark = visual.bookmark_target
+      ? report.bookmarks?.find((item) => item.id === visual.bookmark_target)
+      : null;
+    const behaviors = [
+      { label: 'Initial visibility', value: visual.is_hidden ? 'Hidden' : 'Visible', confidence: 'exact' },
+      ...(page?.is_hidden ? [{ label: 'Page visibility', value: 'Hidden page', confidence: 'exact' }] : []),
+      ...(page?.is_drillthrough ? [{ label: 'Page purpose', value: 'Drillthrough target', confidence: 'exact' }] : []),
+      ...(bookmark ? [{ label: 'Bookmark action', value: bookmark.name, confidence: 'exact' }] : visual.bookmark_target ? [{ label: 'Bookmark action', value: visual.bookmark_target, confidence: 'exact' }] : []),
+      ...(visual.sync_group ? [{ label: 'Synced slicer group', value: `${visual.sync_group.group_name || 'Unnamed'} · filter changes ${visual.sync_group.filter_changes ? 'on' : 'off'}`, confidence: 'exact' }] : [])
+    ];
+
+    const unknowns = ['Business meaning cannot be proven from field and measure names alone.'];
+    if (!resolvedFilters.length) unknowns.push('No cached merged query is packaged, so the final filter intersection must be reconstructed from individual scopes.');
+    else unknowns.push('The cached merged query is Power BI’s last saved execution and may be stale if Desktop did not rerun the visual.');
+    if (calculations.some((item) => item.origin === 'Model-side measure reference' && !item.expression)) unknowns.push('At least one measure is defined in the remote model; its DAX definition requires live-model metadata.');
+    if (!calculations.length) unknowns.push('No conventional field or calculation binding was decoded for this visual type.');
+    unknowns.push('Current values and contributing rows require a live AAS query.');
+
+    const primary = calculations[0];
+    const summary = primary
+      ? `This ${visual.visual_type_label.toLowerCase()} uses ${primary.name}. ${primary.origin}. ${resolvedFilters.length ? `Power BI packaged ${resolvedFilters.length} merged filter condition${resolvedFilters.length === 1 ? '' : 's'} for its last execution.` : 'No final cached query was packaged.'}`
+      : `This ${visual.visual_type_label.toLowerCase()} has no conventional calculation binding that PBI Lens can safely summarize.`;
+
+    visualExplanation = {
+      title: visual.title || visual.visual_type_label || 'Visual',
+      type: visual.visual_type_label,
+      summary,
+      calculations,
+      resolvedFilters,
+      scopedFilters,
+      interactions,
+      behaviors,
+      unknowns
+    };
+  }
+
+  function explanationMarkdown(explanation) {
+    const lines = [
+      `# ${explanation.title}`,
+      '',
+      `Type: ${explanation.type}`,
+      '',
+      explanation.summary,
+      '',
+      '## Calculations',
+      ...explanation.calculations.map((item) => `- [${item.confidence.toUpperCase()}] ${item.name}: ${item.origin} — ${item.detail}`),
+      '',
+      '## Cached merged filters',
+      ...(explanation.resolvedFilters.length ? explanation.resolvedFilters.map((item) => `- [EXACT] ${item.expression}`) : ['- [UNKNOWN] No cached merged query was packaged.']),
+      '',
+      '## Scoped filters',
+      ...(explanation.scopedFilters.length ? explanation.scopedFilters.map((item) => `- [EXACT] ${item.scope}: ${item.expression}`) : ['- No individual report, page, visual, or slicer filters were decoded.']),
+      '',
+      '## Behavior',
+      ...explanation.behaviors.map((item) => `- [${item.confidence.toUpperCase()}] ${item.label}: ${item.value}`),
+      ...explanation.interactions.map((item) => `- [EXACT] ${item.behavior} ${item.direction.toLowerCase()} ${item.other} (type ${item.type})`),
+      '',
+      '## Unknown or requires live model',
+      ...explanation.unknowns.map((item) => `- ${item}`)
+    ];
+    return lines.join('\n');
   }
 
   function openDaxRunner(query) {
@@ -661,6 +795,7 @@
                 <div><dt>Default state</dt><dd>{selectedVisual.is_hidden ? 'Hidden' : 'Visible'}</dd></div>
                 {#if selectedVisual.sync_group}<div><dt>Sync group</dt><dd>{selectedVisual.sync_group.group_name}</dd></div>{/if}
               </dl>
+              <button class="inspector-action explain-action" onclick={() => explainVisual(selectedVisual)}>{visualExplanationLabel(selectedVisual)}</button>
               {#if selectedVisual.aggregations?.length}
                 <div class="panel-title second"><span>AGGREGATIONS</span><b>{selectedVisual.aggregations.length}</b></div>
                 <div class="filter-list aggregation-list">
@@ -955,6 +1090,60 @@
           <div class="field-dialog-meta"><span>{fieldDialog.language}</span><p>{fieldDialog.subtitle}</p></div>
           <pre>{fieldDialog.content}</pre>
           <footer><button onclick={() => copyText(fieldDialog.content, 'field-dialog')}>{copied === 'field-dialog' ? 'COPIED' : `COPY ${fieldDialog.language}`}</button><button class="primary" onclick={() => fieldDialog = null}>DONE</button></footer>
+        </div>
+      </dialog>
+    {/if}
+    {#if visualExplanation}
+      <dialog open class="explain-dialog-backdrop" aria-labelledby="explain-dialog-title" onclick={(event) => { if (event.target === event.currentTarget) visualExplanation = null; }}>
+        <div class="explain-dialog">
+          <header>
+            <div><div class="crumb">EVIDENCE-BACKED VISUAL DEBUGGER</div><strong id="explain-dialog-title">{visualExplanation.title}</strong><span>{visualExplanation.type}</span></div>
+            <button onclick={() => visualExplanation = null} aria-label="Close visual explanation"><Icon name="close" size={18}/></button>
+          </header>
+          <div class="explain-body">
+            <section class="explain-summary">
+              <span class="confidence inferred">INFERRED SUMMARY</span>
+              <p>{visualExplanation.summary}</p>
+              <div class="confidence-legend"><span class="confidence exact">EXACT</span><em>stored by Power BI</em><span class="confidence inferred">INFERRED</span><em>assembled from packaged evidence</em><span class="confidence unknown">UNKNOWN</span><em>not provable from this file</em></div>
+            </section>
+
+            <section class="explain-card">
+              <header><div><span>01</span><strong>Calculation</strong></div><b>{visualExplanation.calculations.length}</b></header>
+              <div class="explain-list">
+                {#each visualExplanation.calculations as calculation}
+                  <article><span class:exact={calculation.confidence === 'exact'} class:unknown={calculation.confidence === 'unknown'} class="confidence">{calculation.confidence.toUpperCase()}</span><strong>{calculation.name}</strong><p>{calculation.origin}</p><code>{calculation.detail}</code>{#if calculation.expression}<details><summary>View DAX definition</summary><pre>{calculation.expression}</pre></details>{/if}</article>
+                {:else}<div class="explain-empty">No conventional calculation binding was decoded.</div>{/each}
+              </div>
+            </section>
+
+            <section class="explain-card">
+              <header><div><span>02</span><strong>Effective filters</strong></div><b>{visualExplanation.resolvedFilters.length + visualExplanation.scopedFilters.length}</b></header>
+              <div class="explain-list">
+                {#if visualExplanation.resolvedFilters.length}
+                  <div class="explain-subtitle"><span class="confidence exact">EXACT</span> Cached merged Where</div>
+                  {#each visualExplanation.resolvedFilters as filter}<article><strong>{filter.kind || 'Resolved condition'}</strong><code>{filter.expression}</code><p>{filter.note}</p></article>{/each}
+                {:else}<article><span class="confidence unknown">UNKNOWN</span><strong>Final merged query</strong><p>Power BI did not package a cached final query for this visual.</p></article>{/if}
+                {#if visualExplanation.scopedFilters.length}
+                  <div class="explain-subtitle"><span class="confidence exact">EXACT</span> Individual scopes</div>
+                  {#each visualExplanation.scopedFilters as filter}<article class:muted={!filter.active}><strong>{filter.scope} · {filter.kind || 'Filter'}</strong><code>{filter.expression}</code>{#if filter.target}<p>{filter.target}</p>{/if}</article>{/each}
+                {/if}
+              </div>
+            </section>
+
+            <section class="explain-card">
+              <header><div><span>03</span><strong>Behavior</strong></div><b>{visualExplanation.behaviors.length + visualExplanation.interactions.length}</b></header>
+              <div class="explain-list">
+                {#each visualExplanation.behaviors as behavior}<article><span class="confidence exact">EXACT</span><strong>{behavior.label}</strong><p>{behavior.value}</p></article>{/each}
+                {#each visualExplanation.interactions as interaction}<article><span class="confidence exact">EXACT</span><strong>{interaction.behavior}</strong><p>{interaction.direction} {interaction.other}</p><code>interaction type {interaction.type}</code></article>{/each}
+              </div>
+            </section>
+
+            <section class="explain-card explain-unknowns">
+              <header><div><span>04</span><strong>Unknown or live-model dependent</strong></div><b>{visualExplanation.unknowns.length}</b></header>
+              <div class="explain-list">{#each visualExplanation.unknowns as unknown}<article><span class="confidence unknown">UNKNOWN</span><p>{unknown}</p></article>{/each}</div>
+            </section>
+          </div>
+          <footer><span>No business meaning or current value is guessed.</span><button onclick={() => copyText(explanationMarkdown(visualExplanation), 'visual-explanation')}>{copied === 'visual-explanation' ? 'COPIED' : 'COPY DEBUG REPORT'}</button><button class="primary" onclick={() => visualExplanation = null}>DONE</button></footer>
         </div>
       </dialog>
     {/if}
