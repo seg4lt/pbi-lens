@@ -1,4 +1,5 @@
 pub mod aas;
+pub mod export;
 pub mod pbix;
 
 use aas::{execute_dax, DaxRunRequest, DaxRunResult};
