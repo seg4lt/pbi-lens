@@ -44,7 +44,6 @@
   let updateStatus = $state('idle');
   let updateProgress = $state(null);
   let updateError = $state('');
-  let daxRunnerOpen = $state(false);
   let daxRunLoading = $state(false);
   let daxRunError = $state('');
   let daxRunResult = $state(null);
@@ -66,6 +65,7 @@
     ['data', 'table', 'Data'],
     ['sources', 'database', 'Sources'],
     ['queries', 'search', 'Queries'],
+    ['dax', 'play', 'Run DAX'],
     ['contents', 'files', 'Contents']
   ];
 
@@ -109,10 +109,8 @@
       dataFilter = '';
       reportFitMode = true;
       hiddenVisuals = (data.pages[0]?.visuals || []).map((visual, index) => visual.is_hidden ? index : -1).filter((index) => index >= 0);
-      aasServerUrl = data.aas_connection?.server_url || '';
-      aasCatalog = data.aas_connection?.catalog || '';
-      aasClientSecret = '';
-      daxRunnerOpen = false;
+      aasServerUrl ||= data.aas_connection?.server_url || '';
+      aasCatalog ||= data.aas_connection?.catalog || '';
       daxRunResult = null;
       daxRunError = '';
       const entry = { path: data.path, name: data.name, size: data.size };
@@ -289,26 +287,12 @@
   }
 
   function openDaxRunner(query) {
-    daxRunQuery = query?.expression || '';
+    if (query?.expression) daxRunQuery = query.expression;
     aasServerUrl ||= report?.aas_connection?.server_url || '';
     aasCatalog ||= report?.aas_connection?.catalog || '';
     daxRunResult = null;
     daxRunError = '';
-    daxRunnerOpen = true;
-  }
-
-  function closeDaxRunner() {
-    if (daxRunLoading) return;
-    daxRunnerOpen = false;
-    daxRunResult = null;
-    daxRunError = '';
-    aasTenantId = '';
-    aasClientId = '';
-    aasClientSecret = '';
-    aasRole = '';
-    aasCustomData = '';
-    aasServerUrl = report?.aas_connection?.server_url || '';
-    aasCatalog = report?.aas_connection?.catalog || '';
+    activeView = 'dax';
   }
 
   async function runDax() {
@@ -558,10 +542,6 @@
           <button class:active={activeView === item[0]} onclick={() => selectView(item[0])} title={item[2]}><Icon name={item[1]} size={20}/><span>{item[2]}</span></button>
         {/each}
       </nav>
-      <button class="rail-dax" class:active={daxRunnerOpen} onclick={() => openDaxRunner()} title="Run DAX query">
-        <Icon name="play" size={20}/>
-        <span>Run DAX</span>
-      </button>
       <button
         class="rail-update"
         class:busy={updateStatus === 'checking' || updateStatus === 'downloading' || updateStatus === 'installing'}
@@ -889,6 +869,42 @@
             <div class="big-empty"><Icon name="search" size={34}/><h3>No saved DAX query tabs</h3><p>This is normal when the report author never used Power BI Desktop’s DAX query view. Each data visual can still contain its own semantic query—select one in Report and open “View semantic query.”</p></div>
           {/if}
         </section>
+      {:else if activeView === 'dax'}
+        <section class="content-view standalone dax-page-view">
+          <div class="view-heading"><div><div class="crumb">LIVE AAS / XMLA</div><h2>Run DAX query</h2></div><div class="canvas-meta">Values stay in memory until PBI Lens closes</div></div>
+          <div class="dax-runner dax-runner-page">
+            <div class="dax-runner-body">
+              <section class="runner-config">
+                <div class="runner-section-title">SERVER &amp; MODEL</div>
+                <label><span>AAS server URL</span><input bind:value={aasServerUrl} placeholder="Enter exact configured server URL" autocomplete="off"/><small>Loaded from the opened PBIT connection when it is packaged there; otherwise left blank.</small></label>
+                <label><span>Catalog / model</span><input bind:value={aasCatalog} placeholder="Enter exact catalog name" autocomplete="off"/></label>
+
+                <div class="runner-section-title">AZURE APPLICATION CREDENTIALS</div>
+                <label><span>Tenant ID</span><input bind:value={aasTenantId} placeholder="Microsoft Entra tenant UUID" autocomplete="off"/></label>
+                <label><span>Client ID</span><input bind:value={aasClientId} placeholder="Analysis Services application client UUID" autocomplete="off"/></label>
+                <label><span>Client secret</span><input type="password" bind:value={aasClientSecret} placeholder="Application client secret" autocomplete="off"/><small>Masked and held in memory only. It is never saved to disk or local storage.</small></label>
+
+                <div class="runner-section-title">OPTIONAL ROW-LEVEL SECURITY</div>
+                <label><span>AAS role</span><input type="password" bind:value={aasRole} placeholder="Enter exact configured role" autocomplete="off"/><small>Leave Role and CustomData both blank for an unscoped service-principal query. Both fields remain masked in memory until the app closes.</small></label>
+                <label><span>CustomData</span><input type="password" bind:value={aasCustomData} placeholder="Paste exact configured CustomData value" autocomplete="off"/><small>This value cannot be inferred from the DAX query and is never persisted.</small></label>
+              </section>
+              <section class="runner-query">
+                <div class="runner-section-title">DAX QUERY</div>
+                <textarea bind:value={daxRunQuery} spellcheck="false" aria-label="DAX query" placeholder="Enter DAX query"></textarea>
+                {#if daxRunError}<div class="runner-error"><Icon name="warning" size={16}/><span><strong>Query failed</strong>{daxRunError}</span></div>{/if}
+                {#if daxRunResult}
+                  <div class="runner-result-meta"><span>HTTP {daxRunResult.http_status}</span><span>{daxRunResult.elapsed_ms} ms</span><span>{daxRunResult.rows.length} rows</span></div>
+                  {#if daxRunResult.columns.length}
+                    <div class="runner-table-wrap"><table><thead><tr>{#each daxRunResult.columns as column}<th>{column}</th>{/each}</tr></thead><tbody>{#each daxRunResult.rows.slice(0, 500) as row}<tr>{#each row as cell}<td>{cell}</td>{/each}</tr>{/each}</tbody></table></div>
+                  {:else}<div class="runner-empty-result">The request succeeded but the XMLA response contained no tabular rows.</div>{/if}
+                {:else if !daxRunError}
+                  <div class="runner-placeholder"><Icon name="info" size={22}/><strong>Ready to query Azure Analysis Services</strong><span>Nothing is sent until you press Run. Results and server errors will appear here.</span></div>
+                {/if}
+              </section>
+            </div>
+            <footer><span>Runs directly against the configured AAS model using XMLA.</span><button class="primary" onclick={runDax} disabled={daxRunLoading}>{daxRunLoading ? 'RUNNING…' : 'RUN DAX'}</button></footer>
+          </div>
+        </section>
       {:else if activeView === 'sources'}
         <section class="content-view standalone sources-view">
           <div class="view-heading"><div><div class="crumb">CONNECTIONS &amp; POWER QUERY</div><h2>Data sources</h2></div><div class="canvas-meta">{report.sources.length} sources · {report.queries.length} queries</div></div>
@@ -939,43 +955,6 @@
           <div class="field-dialog-meta"><span>{fieldDialog.language}</span><p>{fieldDialog.subtitle}</p></div>
           <pre>{fieldDialog.content}</pre>
           <footer><button onclick={() => copyText(fieldDialog.content, 'field-dialog')}>{copied === 'field-dialog' ? 'COPIED' : `COPY ${fieldDialog.language}`}</button><button class="primary" onclick={() => fieldDialog = null}>DONE</button></footer>
-        </div>
-      </dialog>
-    {/if}
-    {#if daxRunnerOpen}
-      <dialog open class="dax-runner-backdrop" aria-labelledby="dax-runner-title" onclick={(event) => { if (event.target === event.currentTarget) closeDaxRunner(); }}>
-        <div class="dax-runner">
-          <header><div><div class="crumb">LIVE AAS / XMLA</div><strong id="dax-runner-title">Run DAX query</strong></div><button onclick={closeDaxRunner} disabled={daxRunLoading} aria-label="Close DAX runner"><Icon name="close" size={17}/></button></header>
-          <div class="dax-runner-body">
-            <section class="runner-config">
-              <div class="runner-section-title">SERVER &amp; MODEL</div>
-              <label><span>AAS server URL</span><input bind:value={aasServerUrl} placeholder="Enter exact configured server URL"/><small>Loaded from the opened PBIT connection when it is packaged there; otherwise left blank.</small></label>
-              <label><span>Catalog / model</span><input bind:value={aasCatalog} placeholder="Enter exact catalog name"/></label>
-
-              <div class="runner-section-title">AZURE APPLICATION CREDENTIALS</div>
-              <label><span>Tenant ID</span><input bind:value={aasTenantId} placeholder="Microsoft Entra tenant UUID" autocomplete="off"/></label>
-              <label><span>Client ID</span><input bind:value={aasClientId} placeholder="Analysis Services application client UUID" autocomplete="off"/></label>
-              <label><span>Client secret</span><input type="password" bind:value={aasClientSecret} placeholder="Application client secret" autocomplete="off"/><small>Held in memory only. It is never saved to disk or local storage.</small></label>
-
-              <div class="runner-section-title">OPTIONAL ROW-LEVEL SECURITY</div>
-              <label><span>AAS role</span><input type="password" bind:value={aasRole} placeholder="Enter exact configured role" autocomplete="off"/><small>Leave Role and CustomData both blank for an unscoped service-principal query. Both fields are masked and cleared when this dialog closes.</small></label>
-              <label><span>CustomData</span><input type="password" bind:value={aasCustomData} placeholder="Paste exact configured CustomData value" autocomplete="off"/><small>This value cannot be inferred from the DAX query and is cleared when this dialog closes.</small></label>
-            </section>
-            <section class="runner-query">
-              <div class="runner-section-title">DAX QUERY</div>
-              <textarea bind:value={daxRunQuery} spellcheck="false" aria-label="DAX query" placeholder="Enter DAX query"></textarea>
-              {#if daxRunError}<div class="runner-error"><Icon name="warning" size={16}/><span><strong>Query failed</strong>{daxRunError}</span></div>{/if}
-              {#if daxRunResult}
-                <div class="runner-result-meta"><span>HTTP {daxRunResult.http_status}</span><span>{daxRunResult.elapsed_ms} ms</span><span>{daxRunResult.rows.length} rows</span></div>
-                {#if daxRunResult.columns.length}
-                  <div class="runner-table-wrap"><table><thead><tr>{#each daxRunResult.columns as column}<th>{column}</th>{/each}</tr></thead><tbody>{#each daxRunResult.rows.slice(0, 500) as row}<tr>{#each row as cell}<td>{cell}</td>{/each}</tr>{/each}</tbody></table></div>
-                {:else}<div class="runner-empty-result">The request succeeded but the XMLA response contained no tabular rows.</div>{/if}
-              {:else if !daxRunError}
-                <div class="runner-placeholder"><Icon name="info" size={22}/><strong>Ready to query Azure Analysis Services</strong><span>Nothing is sent until you press Run. Results and server errors will appear here.</span></div>
-              {/if}
-            </section>
-          </div>
-          <footer><span>Runs directly against the configured AAS model using XMLA.</span><button onclick={closeDaxRunner} disabled={daxRunLoading}>CANCEL</button><button class="primary" onclick={runDax} disabled={daxRunLoading}>{daxRunLoading ? 'RUNNING…' : 'RUN DAX'}</button></footer>
         </div>
       </dialog>
     {/if}
