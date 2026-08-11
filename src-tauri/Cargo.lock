@@ -2673,7 +2673,7 @@ dependencies = [
 
 [[package]]
 name = "pbi-lens"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "reqwest",
  "rfd",
